@@ -1,0 +1,511 @@
+/* AutoApply — Overlay Styles
+ * All classes prefixed with autoapply- to avoid host page conflicts.
+ * Dark theme with glassmorphism, gradient accents, and smooth animations.
+ */
+
+/* ═══════════════════════════════════════════
+   Container & Layout
+   ═══════════════════════════════════════════ */
+
+.autoapply-overlay {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  width: 420px;
+  max-width: calc(100vw - 32px);
+  max-height: 85vh;
+  z-index: 2147483647;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #e2e8f0;
+  background: rgba(15, 15, 35, 0.92);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  box-shadow:
+    0 25px 60px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255, 255, 255, 0.05) inset,
+    0 1px 0 rgba(255, 255, 255, 0.05) inset;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: autoapply-slide-in 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.autoapply-overlay.autoapply-dragging {
+  user-select: none;
+}
+
+.autoapply-dragging .autoapply-header {
+  cursor: grabbing;
+}
+
+@keyframes autoapply-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(30px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+.autoapply-overlay.autoapply-minimized {
+  width: auto;
+  max-height: none;
+  border-radius: 12px;
+  animation: autoapply-pop-in 0.2s ease-out;
+}
+
+@keyframes autoapply-pop-in {
+  from { transform: scale(0.9); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+/* ═══════════════════════════════════════════
+   Header
+   ═══════════════════════════════════════════ */
+
+.autoapply-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  background: linear-gradient(135deg, rgba(102, 126, 234, 0.15), rgba(118, 75, 162, 0.15));
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+  cursor: grab;
+}
+
+.autoapply-logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+}
+
+.autoapply-logo-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #667eea, #764ba2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 800;
+  color: white;
+}
+
+.autoapply-header-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.autoapply-header-btn {
+  background: none;
+  border: none;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 16px;
+  line-height: 1;
+  transition: all 0.15s ease;
+}
+
+.autoapply-header-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
+}
+
+/* ═══════════════════════════════════════════
+   Fit Score Section
+   ═══════════════════════════════════════════ */
+
+.autoapply-fit-section {
+  padding: 12px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+
+.autoapply-fit-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.autoapply-fit-score {
+  font-size: 28px;
+  font-weight: 800;
+  background: linear-gradient(135deg, #667eea, #764ba2);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  line-height: 1;
+}
+
+.autoapply-fit-verdict {
+  font-size: 13px;
+  color: #94a3b8;
+}
+
+.autoapply-fit-skills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.autoapply-skill-tag {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 100px;
+  font-weight: 500;
+}
+
+.autoapply-skill-tag.matched {
+  background: rgba(74, 222, 128, 0.12);
+  color: #4ade80;
+  border: 1px solid rgba(74, 222, 128, 0.2);
+}
+
+.autoapply-skill-tag.missing {
+  background: rgba(248, 113, 113, 0.12);
+  color: #f87171;
+  border: 1px solid rgba(248, 113, 113, 0.2);
+}
+
+/* ═══════════════════════════════════════════
+   Duplicate Warning
+   ═══════════════════════════════════════════ */
+
+.autoapply-duplicate-warning {
+  padding: 8px 16px;
+  background: rgba(251, 191, 36, 0.08);
+  border-bottom: 1px solid rgba(251, 191, 36, 0.15);
+  color: #fbbf24;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* ═══════════════════════════════════════════
+   Step Indicator
+   ═══════════════════════════════════════════ */
+
+.autoapply-step-indicator {
+  padding: 8px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+
+/* ═══════════════════════════════════════════
+   Fields List
+   ═══════════════════════════════════════════ */
+
+.autoapply-fields {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
+}
+
+.autoapply-fields::-webkit-scrollbar {
+  width: 5px;
+}
+
+.autoapply-fields::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.autoapply-fields::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+}
+
+.autoapply-field-row {
+  display: flex;
+  align-items: flex-start;
+  padding: 8px 16px;
+  gap: 8px;
+  transition: background 0.15s ease;
+}
+
+.autoapply-field-row:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.autoapply-confidence-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 6px;
+  flex-shrink: 0;
+}
+
+.autoapply-confidence-dot.high {
+  background: #4ade80;
+  box-shadow: 0 0 6px rgba(74, 222, 128, 0.4);
+}
+
+.autoapply-confidence-dot.medium {
+  background: #fbbf24;
+  box-shadow: 0 0 6px rgba(251, 191, 36, 0.4);
+}
+
+.autoapply-confidence-dot.low {
+  background: #f87171;
+  box-shadow: 0 0 6px rgba(248, 113, 113, 0.4);
+}
+
+.autoapply-confidence-dot.skip {
+  background: #64748b;
+}
+
+.autoapply-field-info {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+}
+
+.autoapply-field-label {
+  font-size: 11px;
+  color: #64748b;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  margin-bottom: 2px;
+}
+
+.autoapply-field-value {
+  font-size: 13px;
+  color: #e2e8f0;
+  word-break: break-word;
+  white-space: pre-wrap;
+  max-height: 80px;
+  overflow: hidden;
+}
+
+.autoapply-field-value.expandable::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 24px;
+  background: linear-gradient(to bottom, rgba(15, 15, 35, 0), rgba(15, 15, 35, 0.92));
+  pointer-events: none;
+}
+
+.autoapply-field-value.expanded {
+  max-height: none;
+}
+
+.autoapply-field-value.expanded.expandable::after {
+  display: none;
+}
+
+.autoapply-expand-toggle {
+  background: none;
+  border: none;
+  color: #667eea;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 0;
+  margin-top: 2px;
+  display: inline-block;
+  transition: color 0.15s ease;
+}
+
+.autoapply-expand-toggle:hover {
+  color: #8b9cf7;
+}
+
+.autoapply-field-value.skip {
+  color: #64748b;
+  font-style: italic;
+}
+
+/* Editable field state */
+.autoapply-field-input {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(102, 126, 234, 0.4);
+  border-radius: 6px;
+  padding: 4px 8px;
+  color: #e2e8f0;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  resize: vertical;
+  min-height: 28px;
+  transition: border-color 0.15s ease;
+}
+
+.autoapply-field-input:focus {
+  border-color: #667eea;
+  box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.2);
+}
+
+.autoapply-edit-btn {
+  background: none;
+  border: none;
+  color: #64748b;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  font-size: 14px;
+  margin-top: 2px;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+
+.autoapply-edit-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
+}
+
+/* ═══════════════════════════════════════════
+   Footer / Actions
+   ═══════════════════════════════════════════ */
+
+.autoapply-footer {
+  padding: 12px 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.autoapply-btn {
+  flex: 1;
+  padding: 10px 16px;
+  border: none;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-family: inherit;
+}
+
+.autoapply-btn-primary {
+  background: linear-gradient(135deg, #667eea, #764ba2);
+  color: white;
+  box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+}
+
+.autoapply-btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+}
+
+.autoapply-btn-primary:active {
+  transform: translateY(0);
+}
+
+.autoapply-btn-secondary {
+  background: rgba(255, 255, 255, 0.06);
+  color: #94a3b8;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.autoapply-btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #e2e8f0;
+}
+
+/* ═══════════════════════════════════════════
+   Loading State
+   ═══════════════════════════════════════════ */
+
+.autoapply-loading {
+  padding: 40px 16px;
+  text-align: center;
+  color: #94a3b8;
+}
+
+.autoapply-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid rgba(102, 126, 234, 0.2);
+  border-top-color: #667eea;
+  border-radius: 50%;
+  animation: autoapply-spin 0.8s linear infinite;
+  margin: 0 auto 12px;
+}
+
+@keyframes autoapply-spin {
+  to { transform: rotate(360deg); }
+}
+
+.autoapply-loading-text {
+  font-size: 13px;
+  margin-top: 8px;
+}
+
+/* ═══════════════════════════════════════════
+   Error State
+   ═══════════════════════════════════════════ */
+
+.autoapply-error {
+  padding: 16px;
+  background: rgba(248, 113, 113, 0.08);
+  border-radius: 8px;
+  margin: 12px 16px;
+  color: #f87171;
+  font-size: 12px;
+}
+
+/* ═══════════════════════════════════════════
+   Minimized State
+   ═══════════════════════════════════════════ */
+
+.autoapply-mini-btn {
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.autoapply-mini-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* ═══════════════════════════════════════════
+   Status Messages
+   ═══════════════════════════════════════════ */
+
+.autoapply-status {
+  padding: 8px 16px;
+  font-size: 12px;
+  color: #4ade80;
+  background: rgba(74, 222, 128, 0.06);
+  border-top: 1px solid rgba(74, 222, 128, 0.1);
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.autoapply-status.error {
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.06);
+  border-color: rgba(248, 113, 113, 0.1);
+}
