@@ -1,0 +1,44 @@
+{
+  "manifest_version": 2,
+  "name": "AutoApply",
+  "version": "1.0.0",
+  "description": "AI-powered job application autofill agent - scrapes forms, maps your profile, fills intelligently.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "http://localhost:8000/*"
+  ],
+  "browser_action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "48": "icons/icon-48.svg",
+      "96": "icons/icon-96.svg"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["lib/utils.js", "content/scraper.js", "content/filler.js", "content/overlay.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    "content/overlay.css"
+  ],
+  "commands": {
+    "toggle-autofill": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+A",
+        "mac": "Command+Shift+A"
+      },
+      "description": "Start AutoApply autofill"
+    }
+  },
+  "background": {
+    "scripts": ["background/background.js"]
+  },
+  "icons": {
+    "48": "icons/icon-48.svg",
+    "96": "icons/icon-96.svg"
+  }
+}

@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>AutoApply Control Panel</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+    <!-- Header -->
+    <header class="popup-header">
+      <div class="logo-section">
+        <div class="logo-icon">A</div>
+        <span class="logo-text">AutoApply</span>
+      </div>
+      <div class="status-indicator" id="backend-status">
+        <span class="status-dot"></span>
+        <span class="status-text">Checking connection...</span>
+      </div>
+    </header>
+
+    <!-- Navigation Tabs -->
+    <nav class="popup-tabs">
+      <button class="tab-btn active" id="tab-dashboard">Dashboard</button>
+      <button class="tab-btn" id="tab-profile">Profile & Info</button>
+    </nav>
+
+    <!-- Main Content Panel -->
+    <main class="popup-content">
+      
+      <!-- Dashboard Section -->
+      <section class="content-section active" id="sect-dashboard">
+        <div class="setup-checklist">
+          <div class="checklist-item" id="chk-resume">
+            <span class="chk-icon">○</span>
+            <span class="chk-label">Resume PDF uploaded</span>
+          </div>
+          <div class="checklist-item" id="chk-knowledge">
+            <span class="chk-icon">○</span>
+            <span class="chk-label">Knowledge file (knowledge.md) set</span>
+          </div>
+        </div>
+
+        <button class="start-btn" id="start-autofill" disabled>
+          <span>Start AutoFill Scan</span>
+          <small>Open a job application page first</small>
+        </button>
+
+        <div class="recent-apps-section">
+          <h3>Recent Applications</h3>
+          <div id="recent-apps-list" class="apps-list">
+            <div class="no-apps-msg">No applications logged yet.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Profile & Knowledge Section -->
+      <section class="content-section" id="sect-profile">
+        <button id="open-full-tab-btn" class="save-btn" style="margin-bottom: 15px; background: var(--bg-surface); border: 1px solid var(--border); color: var(--text-muted);">
+          ↗️ Open Setup in Full Tab (Fixes Mac upload issue)
+        </button>
+        <div class="form-group">
+          <label>1. Upload Resume (PDF)</label>
+          <div class="file-upload-zone" id="resume-drop-zone">
+            <input type="file" id="resume-file-input" accept=".pdf" style="display: none;">
+            <div class="upload-zone-text">
+              <span class="upload-icon">📄</span>
+              <span class="upload-prompt">Drag & Drop PDF here (or click)</span>
+              <span class="upload-status" id="resume-upload-status">Clicking may close popup on Mac</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="knowledge-input">2. Knowledge File (Extra Info / markdown)</label>
+          <textarea id="knowledge-input" placeholder="Add extra context that's not on your resume. E.g.:
+- Preferred salary: 15,00,000 INR
+- Notice period: 30 days
+- Willing to relocate: Yes
+- Preferred work style: Remote or hybrid
+- Legal details: Authorized to work in India (citizen)"></textarea>
+          <button class="save-btn" id="save-knowledge-btn">Save Knowledge File</button>
+        </div>
+
+        <div class="form-group" style="margin-top: 16px;">
+          <label>3. Structured Profile Details</label>
+          <div class="profile-preview-card">
+            <div id="profile-name">Name: —</div>
+            <div id="profile-email">Email: —</div>
+            <div id="profile-phone">Phone: —</div>
+            <div id="profile-skills-count">Skills: —</div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Footer Status -->
+    <footer class="popup-footer">
+      <span id="footer-msg">Ready</span>
+    </footer>
+  </div>
+
+  <script src="../lib/utils.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
