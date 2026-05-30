@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+venv/
+env/
+.venv/
+
+# Environment
+.env
+*.env.local
+
+# Data files (user-specific)
+backend/data/profile.json
+backend/data/resume.pdf
+backend/data/knowledge.md
+backend/data/applications.json
+backend/data/corrections.json
+backend/data/answer_bank.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Extension build artifacts
+extension/web-ext-artifacts/
+
+# SQLite databases
+backend/data/*.db
+backend/data/*.db-shm
+backend/data/*.db-wal
+
+# Python bytecode (explicit)
+*.pyc
