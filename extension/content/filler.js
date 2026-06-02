@@ -339,6 +339,69 @@ const AutoApplyFiller = (() => {
   }
 
   /**
+   * Determine if the current page is likely the last page of the application form.
+   * @returns {{ isLast: boolean, reason: string }}
+   */
+  function isLastPage() {
+    // Signal 1: Check button text
+    const submitKeywords = [
+      'submit application', 'submit', 'apply now', 'send application',
+      'confirm application', 'review and submit', 'complete application',
+      'finish', 'final submit'
+    ];
+    const nextKeywords = [
+      'next', 'continue', 'save & continue', 'save and continue',
+      'proceed', 'save & next', 'save and next', 'forward'
+    ];
+    
+    const allButtons = [
+      ...document.querySelectorAll('button'),
+      ...document.querySelectorAll('input[type="submit"]'),
+      ...document.querySelectorAll('[role="button"]'),
+    ];
+    
+    let hasSubmitButton = false;
+    let hasNextButton = false;
+    
+    for (const btn of allButtons) {
+      if (btn.offsetParent === null || btn.disabled) continue;
+      const text = (btn.textContent || btn.value || '').toLowerCase().trim();
+      if (submitKeywords.some(kw => text.includes(kw))) hasSubmitButton = true;
+      if (nextKeywords.some(kw => text.includes(kw))) hasNextButton = true;
+    }
+    
+    // Signal 2: Check for progress indicators (e.g., "Step 5 of 5")
+    const bodyText = document.body.innerText;
+    const stepMatch = bodyText.match(/step\s+(\d+)\s+of\s+(\d+)/i);
+    let progressComplete = false;
+    if (stepMatch && stepMatch[1] === stepMatch[2]) {
+      progressComplete = true;
+    }
+    
+    // Signal 3: Count input fields (review pages have very few)
+    const inputCount = document.querySelectorAll(
+      'input:not([type="hidden"]):not([type="submit"]):not([type="button"]), select, textarea'
+    ).length;
+    const isReviewPage = inputCount <= 2;
+    
+    // Decision logic
+    const isLast = (hasSubmitButton && !hasNextButton) 
+                || progressComplete 
+                || (!hasNextButton && isReviewPage);
+    
+    const reasons = [];
+    if (hasSubmitButton && !hasNextButton) reasons.push('submit button found, no next button');
+    if (progressComplete) reasons.push('progress indicator shows final step');
+    if (!hasNextButton && isReviewPage) reasons.push('no next button and very few input fields');
+    if (!hasNextButton && !hasSubmitButton) reasons.push('no navigation buttons found');
+    
+    return {
+      isLast,
+      reason: reasons.join('; ') || 'next/continue button available'
+    };
+  }
+
+  /**
    * Find the nearest label text for an element.
    */
   function findNearestLabelText(el) {
@@ -376,7 +439,7 @@ const AutoApplyFiller = (() => {
     }
   }
 
-  return { fillField, fillAllFields, clickNextButton, detectPageChange };
+  return { fillField, fillAllFields, clickNextButton, detectPageChange, isLastPage };
 })();
 
 if (typeof window !== 'undefined') {

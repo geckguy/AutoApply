@@ -31,6 +31,9 @@
   let pageFields = []; // Cached fields from scraper
   let jdText = ''; // Cached job description
   let cachedDuplicateRes = null; // Cached duplicate response
+  let autopilotActive = false;
+  let autopilotStep = 0;
+  const MAX_AUTOPILOT_STEPS = 15;
 
   // Drag state
   let dragOffsetX = 0, dragOffsetY = 0, isDragging = false;
@@ -241,7 +244,8 @@
 
       <div class="autoapply-footer">
         <button class="autoapply-btn autoapply-btn-secondary autoapply-fill-only-btn">Fill Only</button>
-        <button class="autoapply-btn autoapply-btn-primary autoapply-advance-btn">Fill & Advance ➔</button>
+        <button class="autoapply-btn autoapply-btn-primary autoapply-advance-btn">Fill & Next ➔</button>
+        <button class="autoapply-btn autoapply-autopilot-btn">AutoPilot</button>
       </div>
     `;
 
@@ -294,6 +298,18 @@
 
     overlayContainer.querySelector('.autoapply-advance-btn').addEventListener('click', () => {
       handleFill(true);
+    });
+
+    overlayContainer.querySelector('.autoapply-autopilot-btn').addEventListener('click', () => {
+      runAutoPilot();
+    });
+
+    // Cover letter button events
+    overlayContainer.querySelectorAll('.autoapply-gen-cover-btn').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        const idx = parseInt(e.currentTarget.getAttribute('data-idx'), 10);
+        await generateCoverLetter(idx, e.currentTarget);
+      });
     });
   }
 
@@ -453,6 +469,20 @@
     const valClass = `autoapply-field-value ${inst.action === 'skip' ? 'skip' : ''}${isExpandable ? ' expandable' : ''}`;
     const toggleHtml = isExpandable ? `<button class="autoapply-expand-toggle" data-idx="${idx}">▼ more</button>` : '';
 
+    const labelLower = (field.label || field.placeholder || field.name || '').toLowerCase();
+    const isCoverLetter = (field.type === 'textarea' || field.type === 'text') && (
+      labelLower.includes('cover letter') || labelLower.includes('cover_letter') 
+      || labelLower.includes('coverletter') || labelLower.includes('letter of interest')
+    );
+
+    const coverLetterBtnHtml = isCoverLetter ? `
+      <div style="margin-top: 6px;">
+        <button class="autoapply-btn autoapply-gen-cover-btn" data-idx="${idx}" style="font-size: 11px; padding: 4px 8px; width: auto; background: linear-gradient(135deg, #667eea, #764ba2); height: auto; border: none; border-radius: 4px; color: #fff; cursor: pointer;">
+          ✍ Generate Cover Letter
+        </button>
+      </div>
+    ` : '';
+
     return `
       <div class="autoapply-field-row" id="row_${idx}">
         <div class="${dotClass}" title="Confidence: ${inst.confidence || 'unknown'}"></div>
@@ -460,6 +490,7 @@
           <div class="autoapply-field-label">${UTILS.escapeHTML(field.label || field.placeholder || field.name || 'Unnamed Field')} ${field.required ? '<span style="color:#f87171">*</span>' : ''}</div>
           <div class="${valClass}" id="val_${idx}">${UTILS.escapeHTML(displayValue)}</div>
           ${toggleHtml}
+          ${coverLetterBtnHtml}
         </div>
         <button class="autoapply-edit-btn" data-idx="${idx}" title="Edit Value">✎</button>
       </div>
@@ -604,6 +635,228 @@
 
     // Refresh UI to display updated value
     renderMainUI();
+  }
+
+  /**
+   * Run the AutoPilot loop: scrape, get backend instructions, fill, advance, detect page change, and repeat.
+   */
+  async function runAutoPilot() {
+    autopilotActive = true;
+    autopilotStep = 0;
+    
+    const loop = async () => {
+      if (!autopilotActive) return;
+      autopilotStep++;
+      
+      if (autopilotStep > MAX_AUTOPILOT_STEPS) {
+        stopAutoPilot('Stopped: exceeded maximum steps (possible loop)');
+        return;
+      }
+      
+      showAutoPilotStatus(`Filling page ${autopilotStep}...`);
+      
+      // 1. Scrape the current page
+      try {
+        const scrapeResult = SCRAPER.scrapeFormFields();
+        pageFields = scrapeResult.fields;
+        jdText = scrapeResult.job_description || jdText;
+      } catch (err) {
+        stopAutoPilot(`Scraper error: ${err.message}`);
+        return;
+      }
+      
+      if (pageFields.length === 0) {
+        // No fields found - might be a confirmation or loading page
+        // Wait a bit and check if it's the last page
+        await new Promise(r => setTimeout(r, 1000));
+        const lastCheck = FILLER.isLastPage();
+        if (lastCheck.isLast) {
+          stopAutoPilot('AutoPilot complete. Review and submit manually.');
+          logApplicationToHistory();
+          return;
+        }
+      }
+      
+      // 2. Get fill instructions from backend
+      const url = window.location.href;
+      const title = document.title;
+      const platform = UTILS.detectPlatform(url);
+      companyName = UTILS.extractCompany(url, title);
+      roleName = title.split(/ - | at | \| /i)[0]
+        .replace(/Apply for|Job Application for|Opening for/i, '').trim();
+      
+      const formSchema = {
+        url, platform, page_title: title,
+        step: autopilotStep, total_steps: 1,
+        fields: pageFields, job_description: jdText
+      };
+      
+      try {
+        const autofillRes = await UTILS.apiCall('/api/autofill', 'POST', formSchema);
+        currentInstructions = autofillRes.instructions || [];
+      } catch (err) {
+        stopAutoPilot(`Backend error: ${err.message}`);
+        return;
+      }
+      
+      if (!autopilotActive) return; // User clicked stop during API call
+      
+      // 3. Fill all fields
+      const result = await FILLER.fillAllFields(currentInstructions);
+      showAutoPilotStatus(
+        `Page ${autopilotStep}: Filled ${result.filled}, skipped ${result.skipped}`
+      );
+      
+      // 4. Wait for React/Angular to settle
+      await new Promise(r => setTimeout(r, 800));
+      
+      // 5. Check if this is the last page
+      const lastPageInfo = FILLER.isLastPage();
+      if (lastPageInfo.isLast) {
+        autopilotActive = false;
+        showAutoPilotStatus(`AutoPilot complete (${lastPageInfo.reason}). Review and submit manually.`);
+        logApplicationToHistory();
+        // Re-render the full UI so user can review final page
+        renderMainUI();
+        return;
+      }
+      
+      // 6. Click next and wait for page change
+      const clicked = FILLER.clickNextButton();
+      if (!clicked) {
+        stopAutoPilot('Could not find a Next/Continue button.');
+        return;
+      }
+      
+      showAutoPilotStatus(`Advancing to page ${autopilotStep + 1}...`);
+      
+      // 7. Wait for DOM change (new form step)
+      await new Promise((resolve) => {
+        if (activeObserver) activeObserver.disconnect();
+        activeObserver = FILLER.detectPageChange(() => {
+          activeObserver.disconnect();
+          activeObserver = null;
+          resolve();
+        });
+        // Timeout after 10s in case DOM change isn't detected
+        setTimeout(resolve, 10000);
+      });
+      
+      if (!autopilotActive) return;
+      
+      // 8. Small delay then loop
+      await new Promise(r => setTimeout(r, 500));
+      await loop();
+    };
+    
+    await loop();
+  }
+
+  /**
+   * Stop AutoPilot and optionally show a status message.
+   */
+  function stopAutoPilot(message) {
+    autopilotActive = false;
+    if (message) showAutoPilotStatus(message);
+  }
+
+  /**
+   * Display autopilot progress or final status inside the overlay.
+   */
+  function showAutoPilotStatus(text) {
+    if (!overlayContainer) return;
+    overlayContainer.innerHTML = `
+      <div class="autoapply-header">
+        <div class="autoapply-logo">
+          <div class="autoapply-logo-icon">A</div>
+          <span>AutoApply</span>
+        </div>
+        <div class="autoapply-header-actions">
+          <button class="autoapply-header-btn autoapply-close-btn" title="Close">✕</button>
+        </div>
+      </div>
+      <div class="autoapply-autopilot-status">
+        <div class="autoapply-autopilot-indicator ${autopilotActive ? 'active' : 'done'}"></div>
+        <div class="autoapply-autopilot-text">${UTILS.escapeHTML(text)}</div>
+      </div>
+      ${autopilotActive ? `
+        <div class="autoapply-footer">
+          <button class="autoapply-btn autoapply-stop-btn">Stop AutoPilot</button>
+        </div>
+      ` : `
+        <div class="autoapply-footer">
+          <button class="autoapply-btn autoapply-btn-secondary autoapply-close-final-btn">Close</button>
+        </div>
+      `}
+    `;
+    
+    const closeBtn = overlayContainer.querySelector('.autoapply-close-btn');
+    if (closeBtn) closeBtn.addEventListener('click', () => { stopAutoPilot(); removeOverlay(); });
+    
+    const stopBtn = overlayContainer.querySelector('.autoapply-stop-btn');
+    if (stopBtn) stopBtn.addEventListener('click', () => {
+      stopAutoPilot('AutoPilot stopped by user.');
+      renderMainUI();
+    });
+    
+    const closeFinalBtn = overlayContainer.querySelector('.autoapply-close-final-btn');
+    if (closeFinalBtn) closeFinalBtn.addEventListener('click', removeOverlay);
+  }
+
+  /**
+   * Log the successfully filled application to history.
+   */
+  function logApplicationToHistory() {
+    const appData = {
+      company: companyName || 'Unknown',
+      role: roleName || 'Unknown',
+      url: window.location.href,
+      platform: UTILS.detectPlatform(window.location.href),
+      fit_score: jobAnalysis ? jobAnalysis.score : null,
+      status: 'applied',
+      job_description_snippet: jdText ? jdText.slice(0, 200) : ''
+    };
+    UTILS.apiCall('/api/applications/', 'POST', appData).catch(err => {
+      console.error('[AutoApply] Failed to log application:', err);
+    });
+  }
+
+  /**
+   * Request cover letter generation from the backend and update the matching field's value.
+   */
+  async function generateCoverLetter(idx, btn) {
+    const field = pageFields[idx];
+    if (!field) return;
+
+    const originalText = btn.textContent;
+    btn.textContent = 'Generating...';
+    btn.disabled = true;
+    showStatus('Generating cover letter...', false);
+
+    try {
+      const res = await UTILS.apiCall('/api/cover-letter', 'POST', {
+        job_description: jdText,
+        company: companyName,
+        role: roleName
+      });
+
+      // Find and update the instruction for this field
+      let inst = currentInstructions.find(i => i.field_id === field.id);
+      if (!inst) {
+        inst = { field_id: field.id, action: 'fill', value: '', confidence: 'high', source: 'ai' };
+        currentInstructions.push(inst);
+      }
+      inst.value = res.cover_letter;
+      inst.action = 'fill';
+      inst.confidence = 'high';
+
+      showStatus('Cover letter generated!', false);
+      renderMainUI();
+    } catch (err) {
+      btn.textContent = originalText;
+      btn.disabled = false;
+      showStatus(`Cover letter failed: ${err.message}`, true);
+    }
   }
 
   /**

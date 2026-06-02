@@ -509,3 +509,63 @@
   background: rgba(248, 113, 113, 0.06);
   border-color: rgba(248, 113, 113, 0.1);
 }
+
+/* ═══════════════════════════════════════════
+   AutoPilot Mode
+   ═══════════════════════════════════════════ */
+
+.autoapply-autopilot-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 20px 16px;
+  min-height: 80px;
+}
+
+.autoapply-autopilot-indicator {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.autoapply-autopilot-indicator.active {
+  background: #4ade80;
+  animation: autoapply-pulse-dot 1.5s ease-in-out infinite;
+}
+
+.autoapply-autopilot-indicator.done {
+  background: #667eea;
+}
+
+@keyframes autoapply-pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.3); }
+}
+
+.autoapply-autopilot-text {
+  color: #e2e8f0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.autoapply-autopilot-btn {
+  background: linear-gradient(135deg, #f59e0b, #ef4444) !important;
+  color: white !important;
+}
+
+.autoapply-autopilot-btn:hover {
+  background: linear-gradient(135deg, #d97706, #dc2626) !important;
+  transform: translateY(-1px);
+}
+
+.autoapply-stop-btn {
+  background: #ef4444 !important;
+  color: white !important;
+  width: 100%;
+}
+
+.autoapply-stop-btn:hover {
+  background: #dc2626 !important;
+}
+

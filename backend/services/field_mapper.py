@@ -145,6 +145,21 @@ Return ONLY a JSON array of fill instructions:
   {{"field_id": "...", "action": "skip", "value": null, "confidence": "low", "reason": "Cannot determine value"}}
 ]"""
 
+        # Look up similar past answers
+        from backend.services.database import get_database
+        db = get_database()
+        past_answers_section = ""
+        for field in form_schema.fields:
+            ftype = (field.type or "").lower()
+            if ftype in ("text", "textarea") and field.label:
+                similar = db.find_similar_answers(field.label, limit=3)
+                if similar:
+                    lines = [f'  - Q: "{a["question"]}" -> A: "{a["answer"][:150]}"' for a in similar]
+                    past_answers_section += f'\nPast answers for "{field.label}":\n' + '\n'.join(lines)
+
+        if past_answers_section:
+            prompt += f"\n\nPAST ANSWERS (use as reference, adapt for this company):{past_answers_section}"
+
         try:
             result = client.generate_json(prompt, system_instruction)
 

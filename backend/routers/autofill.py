@@ -159,6 +159,54 @@ def get_answer_bank():
     return db.get_answers()
 
 
+@router.post("/cover-letter")
+async def generate_cover_letter(body: dict = Body(...)):
+    """Generate a tailored cover letter."""
+    job_description = body.get("job_description", "")
+    company = body.get("company", "")
+    role = body.get("role", "")
+    
+    profile = _load_profile()
+    if not profile:
+        raise HTTPException(
+            status_code=404,
+            detail="No profile found. Upload a resume first.",
+        )
+    
+    knowledge = _load_knowledge()
+    
+    from backend.services.cover_letter import CoverLetterGenerator
+    letter = CoverLetterGenerator.generate(
+        job_description, company, role, profile, knowledge
+    )
+    return {"cover_letter": letter}
+
+
+@router.post("/tailor-resume")
+async def tailor_resume(body: dict = Body(...)):
+    """Generate JD-tailored resume suggestions."""
+    job_description = body.get("job_description", "")
+    if not job_description:
+        raise HTTPException(
+            status_code=400,
+            detail="job_description is required",
+        )
+    
+    profile = _load_profile()
+    if not profile:
+        raise HTTPException(
+            status_code=404,
+            detail="No profile found. Upload a resume first.",
+        )
+    
+    knowledge = _load_knowledge()
+    
+    from backend.services.resume_tailor import ResumeTailor
+    result = ResumeTailor.tailor(job_description, profile, knowledge)
+    return result
+
+
+
 def _save_generated_answers(
     form_schema: FormSchema, response: FillResponse
 ) -> None:

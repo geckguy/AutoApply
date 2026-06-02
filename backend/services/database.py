@@ -324,6 +324,24 @@ class Database:
         rows = self.conn.execute("SELECT * FROM answer_bank").fetchall()
         return [dict(row) for row in rows]
 
+    def find_similar_answers(self, question: str, limit: int = 5) -> list[dict]:
+        """Find past answers where the question shares keywords."""
+        keywords = [w.lower().strip() for w in question.split() if len(w) > 3]
+        if not keywords:
+            return self.get_answers()[:limit]
+        
+        # Match any keyword
+        conditions = " OR ".join(["LOWER(question) LIKE ?" for _ in keywords])
+        params = [f"%{self._escape_like(kw)}%" for kw in keywords]
+        params.append(limit)
+        
+        rows = self.conn.execute(
+            f"SELECT * FROM answer_bank WHERE {conditions} "
+            f"ORDER BY id DESC LIMIT ?",
+            params
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
