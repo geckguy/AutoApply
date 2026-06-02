@@ -506,4 +506,3 @@ textarea:focus {
 .batch-log-status-text.running { color: #667eea; }
 .batch-log-status-text.done { color: var(--success); }
 .batch-log-status-text.failed { color: var(--error); }
-

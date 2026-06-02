@@ -484,4 +484,3 @@ document.addEventListener('DOMContentLoaded', () => {
   // Initial dashboard scan on launch
   refreshDashboard();
 });
-
