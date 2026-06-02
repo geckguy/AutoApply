@@ -1,10 +1,13 @@
 """Application tracking endpoints — history, duplicate detection."""
 
+import csv
+import io
 import logging
 from typing import Optional
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 
 from backend.models.application import Application, DuplicateCheckResult
 from backend.services.database import get_database
@@ -114,6 +117,50 @@ async def update_status(app_id: str, body: dict):
         raise HTTPException(status_code=404, detail=f"Application {app_id} not found")
 
     return {"status": "success", "message": f"Application {app_id} updated to {new_status}"}
+
+
+@router.get("/export")
+async def export_applications():
+    """Export all applications as CSV."""
+    db = get_database()
+    apps = db.get_applications(limit=10000)
+
+    output = io.StringIO()
+    writer = csv.DictWriter(
+        output,
+        fieldnames=[
+            "applied_at",
+            "company",
+            "role",
+            "platform",
+            "fit_score",
+            "status",
+            "url",
+            "notes",
+        ],
+    )
+    writer.writeheader()
+    for app in apps:
+        writer.writerow(
+            {
+                "applied_at": app.get("applied_at", ""),
+                "company": app.get("company", ""),
+                "role": app.get("role", ""),
+                "platform": app.get("platform", ""),
+                "fit_score": app.get("fit_score", ""),
+                "status": app.get("status", ""),
+                "url": app.get("url", ""),
+                "notes": app.get("notes", ""),
+            }
+        )
+
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=autoapply_applications.csv"},
+    )
+
 
 
 def _normalize_url(url: str) -> str:

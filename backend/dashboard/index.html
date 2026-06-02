@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AutoApply Dashboard</title>
+    <link rel="stylesheet" href="/dashboard/static/dashboard.css">
+    <!-- FontAwesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Sidebar or Header -->
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">A</div>
+                <h1>AutoApply Dashboard</h1>
+            </div>
+            <div class="header-actions">
+                <button id="export-csv-btn" class="btn btn-primary">
+                    <i class="fa-solid fa-file-csv"></i> Export CSV
+                </button>
+            </div>
+        </header>
+
+        <!-- Stats Grid -->
+        <section class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-icon purple"><i class="fa-solid fa-briefcase"></i></div>
+                <div class="stat-info">
+                    <h3 class="stat-value" id="stat-total">-</h3>
+                    <p class="stat-label">Total Applications</p>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon blue"><i class="fa-solid fa-calendar-week"></i></div>
+                <div class="stat-info">
+                    <h3 class="stat-value" id="stat-week">-</h3>
+                    <p class="stat-label">Applied This Week</p>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon orange"><i class="fa-solid fa-comments"></i></div>
+                <div class="stat-info">
+                    <h3 class="stat-value" id="stat-interviews">-</h3>
+                    <p class="stat-label">Interviews</p>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon green"><i class="fa-solid fa-award"></i></div>
+                <div class="stat-info">
+                    <h3 class="stat-value" id="stat-offers">-</h3>
+                    <p class="stat-label">Offers</p>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon pink"><i class="fa-solid fa-chart-simple"></i></div>
+                <div class="stat-info">
+                    <h3 class="stat-value" id="stat-fit">-</h3>
+                    <p class="stat-label">Avg Fit Score</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Main Content Area -->
+        <main class="main-content">
+            <!-- Filter Bar -->
+            <section class="filter-bar">
+                <div class="search-box">
+                    <i class="fa-solid fa-magnifying-glass"></i>
+                    <input type="text" id="search-input" placeholder="Search by role, company, or platform...">
+                </div>
+                <div class="filters">
+                    <div class="filter-group">
+                        <label for="status-filter">Status</label>
+                        <select id="status-filter">
+                            <option value="all">All Statuses</option>
+                            <option value="applied">Applied</option>
+                            <option value="interview">Interview</option>
+                            <option value="rejected">Rejected</option>
+                            <option value="offer">Offer</option>
+                            <option value="withdrawn">Withdrawn</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="date-filter">Date Range</label>
+                        <select id="date-filter">
+                            <option value="all">All Time</option>
+                            <option value="today">Today</option>
+                            <option value="week">Past Week</option>
+                            <option value="month">Past Month</option>
+                        </select>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Applications List/Table -->
+            <section class="table-container">
+                <table class="apps-table">
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Company</th>
+                            <th>Role</th>
+                            <th>Platform</th>
+                            <th>Fit Score</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="apps-tbody">
+                        <tr>
+                            <td colspan="7" class="loading-state">
+                                <i class="fa-solid fa-spinner fa-spin"></i> Loading applications...
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </section>
+        </main>
+    </div>
+
+    <!-- Notification Toast -->
+    <div id="toast" class="toast"></div>
+
+    <script src="/dashboard/static/dashboard.js"></script>
+</body>
+</html>

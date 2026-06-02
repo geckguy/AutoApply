@@ -7,6 +7,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -74,6 +76,17 @@ from backend.routers import profile, autofill, applications
 app.include_router(profile.router)
 app.include_router(autofill.router)
 app.include_router(applications.router)
+
+# Mount dashboard static files
+dashboard_dir = Path(__file__).parent / "dashboard"
+if dashboard_dir.exists():
+    app.mount("/dashboard/static", StaticFiles(directory=str(dashboard_dir)), name="dashboard-static")
+
+
+@app.get("/dashboard")
+async def serve_dashboard():
+    """Serve the applications history dashboard Web UI."""
+    return FileResponse(str(dashboard_dir / "index.html"))
 
 
 @app.get("/api/health")

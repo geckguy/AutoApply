@@ -816,9 +816,16 @@
       status: 'applied',
       job_description_snippet: jdText ? jdText.slice(0, 200) : ''
     };
-    UTILS.apiCall('/api/applications/', 'POST', appData).catch(err => {
-      console.error('[AutoApply] Failed to log application:', err);
-    });
+    UTILS.apiCall('/api/applications/', 'POST', appData)
+      .then(() => {
+        browser.runtime.sendMessage({
+          type: 'APP_LOGGED',
+          data: { company: appData.company, role: appData.role }
+        });
+      })
+      .catch(err => {
+        console.error('[AutoApply] Failed to log application:', err);
+      });
   }
 
   /**
@@ -909,6 +916,10 @@
       UTILS.apiCall('/api/applications/', 'POST', appData)
         .then(res => {
           showStatus('Fields filled and application logged in history!', false);
+          browser.runtime.sendMessage({
+            type: 'APP_LOGGED',
+            data: { company: appData.company, role: appData.role }
+          });
         })
         .catch(err => {
           console.error('[AutoApply] Failed to log application:', err);

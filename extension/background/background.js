@@ -6,12 +6,32 @@
 // Track global extension state
 let extensionState = {
   status: 'idle', // idle, scanning, filling, reviewing, complete
-  lastActiveTabId: null
+  lastActiveTabId: null,
+  todayCount: 0
 };
+
+function showNotification(title, message) {
+  browser.notifications.create({
+    type: 'basic',
+    title: title,
+    message: message,
+    iconUrl: browser.runtime.getURL('icons/icon-96.svg')
+  });
+}
 
 // Listen for messages from popup or content scripts
 browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('[AutoApply Background] Received message:', message);
+
+  if (message.type === 'APP_LOGGED') {
+    extensionState.todayCount = (extensionState.todayCount || 0) + 1;
+    showNotification(
+      'Application Logged',
+      `Applied to ${message.data.role} at ${message.data.company}. Total today: ${extensionState.todayCount}`
+    );
+    sendResponse({ status: 'success' });
+    return false;
+  }
 
   if (message.type === 'START_AUTOFILL') {
     // Query active tab in the current window

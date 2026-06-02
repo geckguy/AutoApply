@@ -6,6 +6,7 @@
   "permissions": [
     "activeTab",
     "storage",
+    "notifications",
     "http://localhost:8000/*"
   ],
   "browser_action": {
