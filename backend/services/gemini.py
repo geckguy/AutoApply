@@ -27,24 +27,18 @@ class RateLimiter:
         self.lock = threading.Lock()
 
     def wait_if_needed(self):
-        sleep_time = 0
-        with self.lock:
-            now = time.time()
-            # Remove calls older than the period
-            while self.calls and now - self.calls[0] > self.period:
-                self.calls.popleft()
-            
-            if len(self.calls) >= self.max_calls:
-                # Calculate sleep time from the oldest call
-                sleep_time = self.period - (now - self.calls[0])
-            else:
-                self.calls.append(now)
-                
-        if sleep_time > 0:
-            logger.info(f"Rate limiting active: waiting {sleep_time:.1f}s before next API call (limit: {self.max_calls} per {self.period}s)...")
+        while True:
+            with self.lock:
+                now = time.time()
+                while self.calls and now - self.calls[0] > self.period:
+                    self.calls.popleft()
+                if len(self.calls) >= self.max_calls:
+                    sleep_time = self.period - (now - self.calls[0]) + 0.1
+                else:
+                    self.calls.append(now)
+                    return
+            logger.info(f"Rate limit: waiting {sleep_time:.1f}s...")
             time.sleep(sleep_time)
-            # Try again to secure a slot after sleeping
-            self.wait_if_needed()
 
 # Global rate limiter instance: max 2 calls per 60 seconds
 _rate_limiter = RateLimiter(max_calls=2, period=60.0)
@@ -85,6 +79,8 @@ class GeminiClient:
                 _rate_limiter.wait_if_needed()
                 
                 response = model.generate_content(prompt)
+                if not response.candidates:
+                    raise ValueError("Gemini returned no candidates (possibly blocked by safety filters)")
                 return response.text
             except Exception as e:
                 last_error = e
@@ -153,10 +149,13 @@ class GeminiClient:
 
 # Singleton instance (lazily initialized)
 _client: Optional[GeminiClient] = None
+_client_lock = threading.Lock()
 
 def get_gemini_client() -> GeminiClient:
     """Get or create the singleton Gemini client."""
     global _client
     if _client is None:
-        _client = GeminiClient()
+        with _client_lock:
+            if _client is None:  # double-check
+                _client = GeminiClient()
     return _client

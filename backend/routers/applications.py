@@ -44,11 +44,11 @@ async def log_application(application: Application):
     )
 
     # Get total count for the response
-    all_apps = db.get_applications(limit=999999)
+    total_apps = db.count_applications()
     return {
         "status": "success",
         "message": f"Application to {application.company} logged",
-        "total_applications": len(all_apps),
+        "total_applications": total_apps,
     }
 
 

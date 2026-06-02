@@ -4,6 +4,7 @@ import json
 import logging
 import sqlite3
 from pathlib import Path
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,12 @@ class Database:
         self.conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self._write_lock = threading.Lock()
         self._init_tables()
+
+    @staticmethod
+    def _escape_like(s: str) -> str:
+        return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
     # ------------------------------------------------------------------
     # Schema
@@ -163,25 +169,30 @@ class Database:
 
     def add_application(self, app_dict: dict) -> None:
         """Insert a new application row."""
-        self.conn.execute(
-            "INSERT INTO applications "
-            "(id, company, role, url, platform, applied_at, "
-            "fit_score, status, notes, job_description_snippet) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                app_dict.get("id"),
-                app_dict.get("company"),
-                app_dict.get("role"),
-                app_dict.get("url"),
-                app_dict.get("platform"),
-                app_dict.get("applied_at"),
-                app_dict.get("fit_score"),
-                app_dict.get("status", "applied"),
-                app_dict.get("notes"),
-                app_dict.get("job_description_snippet"),
-            ),
-        )
-        self.conn.commit()
+        with self._write_lock:
+            self.conn.execute(
+                "INSERT INTO applications "
+                "(id, company, role, url, platform, applied_at, "
+                "fit_score, status, notes, job_description_snippet) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    app_dict.get("id"),
+                    app_dict.get("company"),
+                    app_dict.get("role"),
+                    app_dict.get("url"),
+                    app_dict.get("platform"),
+                    app_dict.get("applied_at"),
+                    app_dict.get("fit_score"),
+                    app_dict.get("status", "applied"),
+                    app_dict.get("notes"),
+                    app_dict.get("job_description_snippet"),
+                ),
+            )
+            self.conn.commit()
+
+    def count_applications(self) -> int:
+        """Return total count of applications."""
+        return self.conn.execute("SELECT COUNT(*) FROM applications").fetchone()[0]
 
     def get_applications(
         self, limit: int = 50, status: str | None = None
@@ -211,24 +222,25 @@ class Database:
         self, app_id: str, status: str, notes: str | None = None
     ) -> bool:
         """Update status (and optionally notes). Returns True if found."""
-        if notes is not None:
-            cur = self.conn.execute(
-                "UPDATE applications SET status = ?, notes = ? WHERE id = ?",
-                (status, notes, app_id),
-            )
-        else:
-            cur = self.conn.execute(
-                "UPDATE applications SET status = ? WHERE id = ?",
-                (status, app_id),
-            )
-        self.conn.commit()
-        return cur.rowcount > 0
+        with self._write_lock:
+            if notes is not None:
+                cur = self.conn.execute(
+                    "UPDATE applications SET status = ?, notes = ? WHERE id = ?",
+                    (status, notes, app_id),
+                )
+            else:
+                cur = self.conn.execute(
+                    "UPDATE applications SET status = ? WHERE id = ?",
+                    (status, app_id),
+                )
+            self.conn.commit()
+            return cur.rowcount > 0
 
     def check_duplicate_url(self, normalized_url: str) -> dict | None:
         """Check for an application with a matching URL (LIKE match)."""
         row = self.conn.execute(
-            "SELECT * FROM applications WHERE url LIKE ?",
-            (f"%{normalized_url}%",),
+            "SELECT * FROM applications WHERE url LIKE ? ESCAPE '\\'",
+            (f"%{self._escape_like(normalized_url)}%",),
         ).fetchone()
         return dict(row) if row else None
 
@@ -238,8 +250,8 @@ class Database:
         """Check for a company+role fuzzy match (case-insensitive LIKE)."""
         rows = self.conn.execute(
             "SELECT * FROM applications WHERE "
-            "LOWER(company) LIKE ? AND LOWER(role) LIKE ?",
-            (f"%{company.lower().strip()}%", f"%{role.lower().strip()}%"),
+            "LOWER(company) LIKE ? ESCAPE '\\' AND LOWER(role) LIKE ? ESCAPE '\\'",
+            (f"%{self._escape_like(company.lower().strip())}%", f"%{self._escape_like(role.lower().strip())}%"),
         ).fetchall()
         # Also check the reverse containment
         if not rows:
@@ -260,22 +272,23 @@ class Database:
 
     def add_correction(self, correction_dict: dict) -> int:
         """Insert a correction and return the total count."""
-        self.conn.execute(
-            "INSERT INTO corrections "
-            "(timestamp, field_label, agent_value, user_value, context, url) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                correction_dict.get("timestamp"),
-                correction_dict.get("field_label"),
-                correction_dict.get("agent_value"),
-                correction_dict.get("user_value"),
-                correction_dict.get("context"),
-                correction_dict.get("url"),
-            ),
-        )
-        self.conn.commit()
-        count = self.conn.execute("SELECT COUNT(*) FROM corrections").fetchone()[0]
-        return count
+        with self._write_lock:
+            self.conn.execute(
+                "INSERT INTO corrections "
+                "(timestamp, field_label, agent_value, user_value, context, url) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    correction_dict.get("timestamp"),
+                    correction_dict.get("field_label"),
+                    correction_dict.get("agent_value"),
+                    correction_dict.get("user_value"),
+                    correction_dict.get("context"),
+                    correction_dict.get("url"),
+                ),
+            )
+            self.conn.commit()
+            count = self.conn.execute("SELECT COUNT(*) FROM corrections").fetchone()[0]
+            return count
 
     def get_recent_corrections(self, limit: int = 50) -> list[dict]:
         """Return the most recent corrections."""
@@ -290,20 +303,21 @@ class Database:
 
     def add_answer(self, answer_dict: dict) -> None:
         """Insert an answer bank entry."""
-        self.conn.execute(
-            "INSERT INTO answer_bank "
-            "(company, role, question_type, question, answer, date) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                answer_dict.get("company"),
-                answer_dict.get("role"),
-                answer_dict.get("question_type"),
-                answer_dict.get("question"),
-                answer_dict.get("answer"),
-                answer_dict.get("date"),
-            ),
-        )
-        self.conn.commit()
+        with self._write_lock:
+            self.conn.execute(
+                "INSERT INTO answer_bank "
+                "(company, role, question_type, question, answer, date) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    answer_dict.get("company"),
+                    answer_dict.get("role"),
+                    answer_dict.get("question_type"),
+                    answer_dict.get("question"),
+                    answer_dict.get("answer"),
+                    answer_dict.get("date"),
+                ),
+            )
+            self.conn.commit()
 
     def get_answers(self) -> list[dict]:
         """Return all answer bank entries."""
@@ -322,11 +336,14 @@ class Database:
 # ---- Module-level singleton ----
 
 _db: Database | None = None
+_db_lock = threading.Lock()
 
 
 def get_database() -> Database:
     """Return the module-level Database singleton, creating it on first call."""
     global _db
     if _db is None:
-        _db = Database()
+        with _db_lock:
+            if _db is None:
+                _db = Database()
     return _db

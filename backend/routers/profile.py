@@ -49,8 +49,11 @@ async def upload_resume(file: UploadFile = File(...)):
     resume_path = DATA_DIR / "resume.pdf"
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large (max 10MB)")
+
     with open(resume_path, "wb") as f:
-        content = await file.read()
         f.write(content)
 
     logger.info(f"Resume saved: {resume_path} ({len(content)} bytes)")
@@ -82,12 +85,13 @@ async def upload_resume(file: UploadFile = File(...)):
 
 
 @router.post("/upload-knowledge")
-async def upload_knowledge(content: str = Body(..., media_type="text/plain")):
+async def upload_knowledge(body: dict = Body(...)):
     """Upload or update the knowledge.md file.
 
     This is a freeform markdown file with additional information about the user
     that supplements the resume (salary expectations, preferences, common Q&A, etc.)
     """
+    content = body.get("content", "")
     knowledge_path = DATA_DIR / "knowledge.md"
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 

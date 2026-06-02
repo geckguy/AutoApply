@@ -78,7 +78,12 @@ const AutoApplyUtils = (() => {
    * @returns {string} Platform name
    */
   function detectPlatform(url) {
-    const hostname = new URL(url).hostname.toLowerCase();
+    let hostname;
+    try {
+      hostname = new URL(url).hostname.toLowerCase();
+    } catch {
+      return 'custom';
+    }
 
     if (hostname.includes('myworkdayjobs.com') || hostname.includes('workday.com')) {
       return 'workday';

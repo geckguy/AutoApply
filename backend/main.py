@@ -48,6 +48,8 @@ async def lifespan(app: FastAPI):
     yield  # App runs here
 
     logger.info("AutoApply backend shutting down")
+    from backend.services.database import get_database
+    get_database().close()
 
 
 # Create the app
@@ -84,9 +86,11 @@ async def health_check():
     # Count applications
     apps_path = DATA_DIR / "applications.json"
     app_count = 0
-    if apps_path.exists():
+    try:
         with open(apps_path, "r") as f:
             app_count = len(json.load(f))
+    except (json.JSONDecodeError, ValueError, FileNotFoundError):
+        app_count = 0
 
     return {
         "status": "healthy",

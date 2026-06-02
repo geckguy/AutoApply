@@ -316,7 +316,7 @@ document.addEventListener('DOMContentLoaded', () => {
     showFooterMessage('Saving knowledge file...');
 
     try {
-      const res = await UTILS.apiCall('/api/profile/upload-knowledge', 'POST', content);
+      const res = await UTILS.apiCall('/api/profile/upload-knowledge', 'POST', { content: content });
       showFooterMessage('Knowledge file saved successfully!');
       checkBackendHealth();
     } catch (err) {

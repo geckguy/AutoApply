@@ -49,7 +49,7 @@ class FitScore(BaseModel):
     missing_skills: list[str] = Field(default_factory=list)
     experience_fit: Optional[str] = None
     notes: Optional[str] = None
-    recommendation: Literal["apply", "stretch", "skip"] = "apply"
+    recommendation: Literal["apply", "stretch", "skip", "unknown"] = "apply"
 
 
 class FillResponse(BaseModel):

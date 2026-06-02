@@ -13,6 +13,11 @@
   const SCRAPER = window.__autoapply_scraper_module;
   const FILLER = window.__autoapply_filler;
 
+  if (!UTILS || !SCRAPER || !FILLER) {
+    console.error('[AutoApply] Required modules not loaded. Ensure script load order: utils.js -> scraper.js -> filler.js -> overlay.js');
+    return;
+  }
+
   let shadowHost = null;
   let shadowRoot = null;
   let overlayContainer = null;
@@ -29,6 +34,8 @@
 
   // Drag state
   let dragOffsetX = 0, dragOffsetY = 0, isDragging = false;
+  let dragMoveHandler = null;
+  let dragUpHandler = null;
 
   /**
    * Start the scan, analysis, and fill-preparation flow.
@@ -123,13 +130,19 @@
       }
     };
 
-    executeBackendCalls();
+    await executeBackendCalls();
   }
 
   /**
    * Remove the overlay element from DOM and cleanup observer.
    */
   function removeOverlay() {
+    if (dragMoveHandler) {
+      document.removeEventListener('mousemove', dragMoveHandler);
+      document.removeEventListener('mouseup', dragUpHandler);
+      dragMoveHandler = null;
+      dragUpHandler = null;
+    }
     if (shadowHost) {
       shadowHost.remove();
       shadowHost = null;
@@ -319,6 +332,12 @@
    * Enable dragging the overlay by its header bar.
    */
   function setupDrag() {
+    // Remove previous handlers if any
+    if (dragMoveHandler) {
+      document.removeEventListener('mousemove', dragMoveHandler);
+      document.removeEventListener('mouseup', dragUpHandler);
+    }
+
     if (!overlayContainer) return;
     const header = overlayContainer.querySelector('.autoapply-header');
     if (!header) return;
@@ -335,22 +354,25 @@
       e.preventDefault();
     });
 
-    document.addEventListener('mousemove', (e) => {
+    dragMoveHandler = (e) => {
       if (!isDragging || !overlayContainer) return;
       const newLeft = e.clientX - dragOffsetX;
       const newTop = e.clientY - dragOffsetY;
       overlayContainer.style.left = `${Math.max(0, newLeft)}px`;
       overlayContainer.style.top = `${Math.max(0, newTop)}px`;
       overlayContainer.style.right = 'auto';
-    });
+    };
 
-    document.addEventListener('mouseup', () => {
+    dragUpHandler = () => {
       if (!isDragging) return;
       isDragging = false;
       if (overlayContainer) {
         overlayContainer.classList.remove('autoapply-dragging');
       }
-    });
+    };
+
+    document.addEventListener('mousemove', dragMoveHandler);
+    document.addEventListener('mouseup', dragUpHandler);
   }
 
   /**
@@ -444,39 +466,7 @@
     `;
   }
 
-  /**
-   * Set up drag-to-move behaviour on the overlay header.
-   */
-  function setupDrag() {
-    const header = overlayContainer.querySelector('.autoapply-header');
-    if (!header) return;
-
-    header.addEventListener('mousedown', (e) => {
-      // Only respond to left button and only on the header itself (not buttons)
-      if (e.button !== 0 || e.target.closest('.autoapply-header-btn')) return;
-      isDragging = true;
-      const rect = overlayContainer.getBoundingClientRect();
-      dragOffsetX = e.clientX - rect.left;
-      dragOffsetY = e.clientY - rect.top;
-      overlayContainer.classList.add('autoapply-dragging');
-      e.preventDefault();
-    });
-
-    document.addEventListener('mousemove', (e) => {
-      if (!isDragging || !overlayContainer) return;
-      overlayContainer.style.left = (e.clientX - dragOffsetX) + 'px';
-      overlayContainer.style.top = (e.clientY - dragOffsetY) + 'px';
-      overlayContainer.style.right = 'auto';
-    });
-
-    document.addEventListener('mouseup', () => {
-      if (!isDragging) return;
-      isDragging = false;
-      if (overlayContainer) {
-        overlayContainer.classList.remove('autoapply-dragging');
-      }
-    });
-  }
+  // Removed duplicate setupDrag() definition
 
   /**
    * Switch a field row into editing mode with an input/select.
@@ -548,7 +538,7 @@
     // Save helper
     const save = () => {
       const newValue = input.value;
-      saveFieldEdit(fieldId, newValue);
+      saveFieldEdit(idx, newValue);
     };
 
     saveBtn.addEventListener('click', (e) => {

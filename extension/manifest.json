@@ -29,7 +29,7 @@
     "toggle-autofill": {
       "suggested_key": {
         "default": "Ctrl+Shift+A",
-        "mac": "Command+Shift+A"
+        "mac": "MacCtrl+Shift+A"
       },
       "description": "Start AutoApply autofill"
     }

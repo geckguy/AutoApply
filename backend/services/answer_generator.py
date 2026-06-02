@@ -47,8 +47,8 @@ class AnswerGenerator:
         profile_summary = ""
         if profile:
             parts = []
-            if profile.personal.first_name:
-                parts.append(f"Name: {profile.personal.first_name} {profile.personal.last_name}")
+            if profile.personal and (profile.personal.first_name or profile.personal.last_name):
+                parts.append(f"Name: {profile.personal.first_name or ''} {profile.personal.last_name or ''}".strip())
             if profile.work_experience:
                 latest = profile.work_experience[0]
                 parts.append(f"Current/Recent: {latest.title} at {latest.company}")
@@ -70,7 +70,8 @@ class AnswerGenerator:
             recent = past_answers[-10:]
             lines = []
             for a in recent:
-                lines.append(f'- {a.company} ({a.role}): "{a.answer[:100]}..."')
+                truncated_ans = a.answer[:100] + ("..." if len(a.answer) > 100 else "")
+                lines.append(f'- {a.company} ({a.role}): "{truncated_ans}"')
             past_answers_text = (
                 "\n\nPAST ANSWERS FOR SIMILAR QUESTIONS (do NOT reuse — write something fresh):\n"
                 + "\n".join(lines)

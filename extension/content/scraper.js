@@ -134,7 +134,7 @@ const AutoApplyScraper = (() => {
   function findLabel(el) {
     // Strategy 1: Explicit <label for="...">
     if (el.id) {
-      const label = document.querySelector(`label[for="${el.id}"]`);
+      const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
       if (label) return cleanLabelText(label.textContent);
     }
 

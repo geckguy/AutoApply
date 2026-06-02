@@ -173,7 +173,7 @@ const AutoApplyFiller = (() => {
     if (el.type === 'radio' || el.type === 'checkbox') {
       // If there's a group, find the right one by label
       if (el.name) {
-        const group = document.querySelectorAll(`input[name="${el.name}"]`);
+        const group = document.querySelectorAll(`input[name="${CSS.escape(el.name)}"]`);
         for (const input of group) {
           const label = findNearestLabelText(input);
           if (
@@ -343,7 +343,7 @@ const AutoApplyFiller = (() => {
    */
   function findNearestLabelText(el) {
     if (el.id) {
-      const label = document.querySelector(`label[for="${el.id}"]`);
+      const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
       if (label) return label.textContent.trim();
     }
     const parent = el.closest('label');
