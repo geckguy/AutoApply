@@ -31,7 +31,7 @@
 | **CSV export** | Download your full application history as a spreadsheet |
 | **Answer memory** | Saves your open-ended answers and reuses context for similar future questions |
 | **Batch apply** | Paste multiple job URLs and run AutoPilot across tabs sequentially |
-| **10+ ATS platforms** | Workday · Greenhouse · Lever · Ashby · LinkedIn · Indeed · Glassdoor · Naukri · Instahyre · Keka · and more |
+| **17 ATS platforms** | Workday · Greenhouse · Lever · Ashby · iCIMS · SmartRecruiters · Taleo · BambooHR · LinkedIn · Indeed · Glassdoor · Wellfound · Darwinbox · Oracle · Naukri · Instahyre · Keka |
 | **Firefox + Chrome** | Full support for both browsers (Manifest V2 and V3) |
 | **Shadow DOM isolation** | Extension UI never conflicts with page styles — works on any site |
 | **Learns from corrections** | Edit a value once and AutoApply remembers for next time |
@@ -268,6 +268,18 @@ All configuration is done through the extension popup — no config files needed
 - **Resume** — upload via the Profile & Info tab
 - **Knowledge file** — free-text notes for details not on your resume
 - **Backend URL** — defaults to `http://127.0.0.1:8000`
+
+---
+
+## Privacy & Security
+
+AutoApply is designed to keep your data private:
+
+- **100% local** — the backend runs on your machine (`localhost:8000`), your resume and profile data are stored in a local `backend/data/` directory
+- **No accounts** — no signup, no login, no cloud services
+- **No telemetry** — zero tracking, zero analytics, zero data collection
+- **Gemini API only** — the only external call is to Google's Gemini API for AI processing. Your data is sent directly from your machine to Google's API and is subject to [Google's API terms](https://ai.google.dev/terms)
+- **Open source** — every line of code is auditable
 
 ---
 
