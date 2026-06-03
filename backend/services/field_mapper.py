@@ -92,12 +92,12 @@ class FieldMapper:
 
         # Add form step context if available
         step_context = ""
-        if hasattr(form_schema, 'current_step') and form_schema.current_step is not None:
+        if hasattr(form_schema, 'step') and form_schema.step is not None:
             total = getattr(form_schema, 'total_steps', None)
             if total is not None:
-                step_context = f"\n\nNOTE: This is step {form_schema.current_step} of {total} in the application form."
+                step_context = f"\n\nNOTE: This is step {form_schema.step} of {total} in the application form."
             else:
-                step_context = f"\n\nNOTE: This is step {form_schema.current_step} of the application form."
+                step_context = f"\n\nNOTE: This is step {form_schema.step} of the application form."
 
         prompt = f"""Fill out a job application form using the applicant's data.
 

@@ -12,12 +12,12 @@ const AutoApplyFiller = (() => {
    */
   async function fillField(instruction) {
     const { field_id, action, value } = instruction;
-    if (action === 'skip' || !value) return false;
+    if (action === 'skip' || value === undefined || value === null) return false;
 
     // Find the element by ID or data attribute
     let el = document.getElementById(field_id);
     if (!el) {
-      el = document.querySelector(`[data-autoapply-id="${field_id}"]`);
+      el = document.querySelector(`[data-autoapply-id="${CSS.escape(field_id)}"]`);
     }
     if (!el) {
       console.warn(`[AutoApply] Field not found: ${field_id}`);

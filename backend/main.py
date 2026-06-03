@@ -86,6 +86,9 @@ if dashboard_dir.exists():
 @app.get("/dashboard")
 async def serve_dashboard():
     """Serve the applications history dashboard Web UI."""
+    if not dashboard_dir.exists():
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Dashboard UI not found.")
     return FileResponse(str(dashboard_dir / "index.html"))
 
 

@@ -97,6 +97,11 @@ function renderApplicationsTable() {
             });
         }
 
+        let safeUrl = '#';
+        if (app.url && (app.url.startsWith('http://') || app.url.startsWith('https://'))) {
+            safeUrl = escapeHtml(app.url);
+        }
+
         // Fit Score Badge Info
         let fitClass = 'unknown';
         let fitText = 'N/A';
@@ -127,7 +132,7 @@ function renderApplicationsTable() {
                 </select>
             </td>
             <td>
-                <a href="${app.url}" target="_blank" class="action-btn url-link" title="Open Job URL" onclick="event.stopPropagation();">
+                <a href="${safeUrl}" target="_blank" class="action-btn url-link" title="Open Job URL" onclick="event.stopPropagation();">
                     <i class="fa-solid fa-arrow-up-right-from-square"></i>
                 </a>
                 <button class="action-btn toggle-details-btn" title="Toggle Details">
@@ -302,8 +307,8 @@ function showToast(message, type = 'success') {
     clearTimeout(toastTimeout);
     toastEl.className = `toast show ${type}`;
     toastEl.innerHTML = type === 'success' 
-        ? `<i class="fa-solid fa-circle-check"></i> ${message}`
-        : `<i class="fa-solid fa-circle-xmark"></i> ${message}`;
+        ? `<i class="fa-solid fa-circle-check"></i> ${escapeHtml(message)}`
+        : `<i class="fa-solid fa-circle-xmark"></i> ${escapeHtml(message)}`;
 
     toastTimeout = setTimeout(() => {
         toastEl.classList.remove('show');

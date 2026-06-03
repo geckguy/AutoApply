@@ -644,8 +644,7 @@
     autopilotActive = true;
     autopilotStep = 0;
     
-    const loop = async () => {
-      if (!autopilotActive) return;
+    while (autopilotActive) {
       autopilotStep++;
       
       if (autopilotStep > MAX_AUTOPILOT_STEPS) {
@@ -682,7 +681,7 @@
       const title = document.title;
       const platform = UTILS.detectPlatform(url);
       companyName = UTILS.extractCompany(url, title);
-      roleName = title.split(/ - | at | \| /i)[0]
+      roleName = title.split(/ - | at | \\| /i)[0]
         .replace(/Apply for|Job Application for|Opening for/i, '').trim();
       
       const formSchema = {
@@ -732,24 +731,29 @@
       
       // 7. Wait for DOM change (new form step)
       await new Promise((resolve) => {
-        if (activeObserver) activeObserver.disconnect();
-        activeObserver = FILLER.detectPageChange(() => {
-          activeObserver.disconnect();
-          activeObserver = null;
+        let resolved = false;
+        const doResolve = () => {
+          if (resolved) return;
+          resolved = true;
+          if (activeObserver) {
+            activeObserver.disconnect();
+            activeObserver = null;
+          }
           resolve();
-        });
+        };
+
+        if (activeObserver) activeObserver.disconnect();
+        activeObserver = FILLER.detectPageChange(doResolve);
+        
         // Timeout after 10s in case DOM change isn't detected
-        setTimeout(resolve, 10000);
+        setTimeout(doResolve, 10000);
       });
       
       if (!autopilotActive) return;
       
       // 8. Small delay then loop
       await new Promise(r => setTimeout(r, 500));
-      await loop();
-    };
-    
-    await loop();
+    }
   }
 
   /**

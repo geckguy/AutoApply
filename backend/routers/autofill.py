@@ -160,7 +160,7 @@ def get_answer_bank():
 
 
 @router.post("/cover-letter")
-async def generate_cover_letter(body: dict = Body(...)):
+def generate_cover_letter(body: dict = Body(...)):
     """Generate a tailored cover letter."""
     job_description = body.get("job_description", "")
     company = body.get("company", "")
@@ -183,7 +183,7 @@ async def generate_cover_letter(body: dict = Body(...)):
 
 
 @router.post("/tailor-resume")
-async def tailor_resume(body: dict = Body(...)):
+def tailor_resume(body: dict = Body(...)):
     """Generate JD-tailored resume suggestions."""
     job_description = body.get("job_description", "")
     if not job_description:

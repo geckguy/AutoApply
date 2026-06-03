@@ -147,7 +147,12 @@ const AutoApplyUtils = (() => {
    * @returns {string} Best guess at company name
    */
   function extractCompany(url, title) {
-    const hostname = new URL(url).hostname;
+    let hostname = '';
+    try {
+      hostname = new URL(url).hostname;
+    } catch (e) {
+      return 'Unknown';
+    }
 
     // Check known ATS patterns where company is in subdomain
     const atsPatterns = [

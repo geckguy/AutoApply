@@ -331,7 +331,7 @@ class Database:
             return self.get_answers()[:limit]
         
         # Match any keyword
-        conditions = " OR ".join(["LOWER(question) LIKE ?" for _ in keywords])
+        conditions = " OR ".join(["LOWER(question) LIKE ? ESCAPE '\\'" for _ in keywords])
         params = [f"%{self._escape_like(kw)}%" for kw in keywords]
         params.append(limit)
         
