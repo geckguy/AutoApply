@@ -31,15 +31,6 @@ AutoApply combines a browser extension with a local Python service. It reads app
 
 > AutoApply never clicks the final **Submit** button. You stay in control of every application.
 
-## Screenshots
-
-<!--
-Add your screenshots here when ready:
-
-![AutoApply dashboard](docs/images/dashboard.png)
-![AutoApply extension review](docs/images/extension-review.png)
--->
-
 ## Why AutoApply
 
 | | |
@@ -80,12 +71,13 @@ Known details stay on the local path. Only unresolved fields are sent to the AI 
 
 ## AI model support
 
-AutoApply currently provides two provider integrations:
+AutoApply provides three provider integrations:
 
 - **Google Gemini** — direct integration using Gemini 2.5 Flash
 - **OpenRouter** — set `OPENROUTER_MODEL` to any model available to your OpenRouter account
+- **OpenCode Go** — an OpenAI-compatible subscription gateway that serves many open models (DeepSeek, Kimi, GLM, Qwen, MiniMax …) behind one key; set `AI_PROVIDER=opencode`, `OPENCODE_API_KEY` and `OPENCODE_MODEL` (for example `deepseek-v4.1-flash`). Run `curl -H "Authorization: Bearer $OPENCODE_API_KEY" https://opencode.ai/zen/go/v1/models` to list the ids your subscription can use.
 
-This gives you access to a broad choice of models without tying AutoApply to one AI vendor. Direct API integrations for providers other than Gemini and OpenRouter are not currently included.
+This gives you access to a broad choice of models without tying AutoApply to one AI vendor. Any other OpenAI-compatible gateway works through the same client — point `OPENCODE_BASE_URL` at it and set `OPENCODE_API_KEY`/`OPENCODE_MODEL` accordingly.
 
 ## Quick start
 
@@ -108,7 +100,9 @@ GEMINI_API_KEY=your_key_here
 or:
 
 ```env
-# Any model available through OpenRouter
+# Any model available through OpenRouter.
+# OPENROUTER_MODEL is required. With no model set, every AI-backed request
+# answers 503 and the extension falls back to local answers only.
 AI_PROVIDER=openrouter
 OPENROUTER_API_KEY=your_key_here
 OPENROUTER_MODEL=provider/model-name
@@ -123,6 +117,11 @@ python -m backend.main
 ```
 
 Open the workspace at [http://127.0.0.1:8000/dashboard](http://127.0.0.1:8000/dashboard).
+
+The service listens on loopback port 8000 by default. Set `AUTOAPPLY_HOST` / `AUTOAPPLY_PORT`
+in `backend/.env` to change that; the dashboard works on any port, but the extension has to be
+told, so set the **Backend** field in the popup to the same address (for example
+`http://127.0.0.1:8123`) and press **Save**.
 
 ### 2. Load the extension
 
@@ -152,12 +151,27 @@ AutoApply includes tailored handling for common platforms such as Workday, Green
 ## Privacy and safety
 
 - The service and application database run locally.
+- The API listens on loopback only, and rejects any API request whose `Host` header is not
+  `localhost`, `127.0.0.1`, or `[::1]`. That check is what stops a public page from using
+  DNS rebinding to reach the local service.
+- Browser requests are accepted from a loopback origin or from a pinned AutoApply extension
+  id (`autoapply@local`, or the published Chrome id). Requests with no `Origin` header —
+  local command-line tools and scripts — are accepted, because the `Host` check above is
+  what keeps other machines out.
 - There are no AutoApply accounts, analytics, or telemetry.
 - Only unresolved fields are sent to your configured AI provider.
 - Sensitive authentication, payment, and government-ID fields are excluded.
 - AutoPilot advances through safe form steps but never submits an application.
 
 Review your chosen model provider's privacy terms before sending resume or profile information. OpenRouter strict mode requests providers that deny data collection and support zero data retention.
+
+`AUTOAPPLY_ALLOWED_HOSTS` and `AUTOAPPLY_EXTENSION_IDS` in `backend/.env` add extra hostnames
+or extension ids to the defaults, for example a reverse-proxy hostname or a locally built
+extension. Leave them empty unless you need them.
+
+`backend/.env` is gitignored and no key has ever been committed, but it does live in this
+directory: if you have shared, synced, or backed up the folder, rotate the provider keys
+(`GEMINI_API_KEY` / `OPENROUTER_API_KEY`) and issue replacements.
 
 ## Development
 
@@ -167,12 +181,30 @@ Run the complete local check suite:
 bash scripts/check.sh
 ```
 
+It compiles the Python sources, runs the unit tests, checks every JavaScript file for syntax
+errors, runs the browser-side safety tests, validates both extension manifests, and fails if
+`extension-chrome/` has drifted from `extension/`.
+
 ```text
 backend/             FastAPI service and dashboard
-extension/           Firefox extension
-extension-chrome/    Chrome, Edge, and Brave extension
+extension/           Firefox extension (canonical source for both packages)
+extension-chrome/    Chrome, Edge, and Brave extension (generated)
+scripts/             check.sh, sync-extension.sh
 tests/               Backend and browser safety tests
 ```
+
+`extension/` is the single source of truth. Chrome cannot load scripts from outside its own
+extension directory, so `extension-chrome/` holds copies of the shared files plus its own
+`manifest.json` and a small `browser` shim in `background/background.js`. After editing
+anything under `extension/`, regenerate the Chromium tree:
+
+```bash
+bash scripts/sync-extension.sh          # rewrite extension-chrome/
+bash scripts/sync-extension.sh --check  # verify without writing (check.sh runs this)
+```
+
+`backend/requirements.txt` lists the direct dependencies; `backend/requirements.lock` pins the
+fully resolved set (including transitive packages) for a reproducible install.
 
 ## License
 

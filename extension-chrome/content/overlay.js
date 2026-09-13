@@ -28,6 +28,15 @@
   let roleName = '';
   let isMinimized = false;
   let activeObserver = null;
+  let pageChangeTimer = null; // Bounds the page-change wait so a silent observer can never hang the flow.
+  let pendingPageChange = null; // Resolver of the in-flight page-change wait.
+  let flowInFlight = false; // Guards against a concurrent scan; cleared when the flow settles.
+  let dismissedUrl = null; // URL the user explicitly closed the panel on (resets on navigation).
+  let previousFocus = null; // Element focused before the panel opened, restored on close.
+  let aiWarning = ''; // Non-fatal AI provider problem reported by the backend.
+  let resolvedDuplicate = null; // { url, resolution, existingId } — the user's answer on this page.
+  let lastFilledPageSignature = null; // Page signature at the last AutoPilot fill.
+  let samePageFillCount = 0; // Consecutive AutoPilot fills of the same page.
   let pageFields = []; // Cached fields from scraper
   let jdText = ''; // Cached job description
   let cachedDuplicateRes = null; // Cached duplicate response
@@ -46,7 +55,38 @@
   const colorScheme = window.matchMedia('(prefers-color-scheme: dark)');
   let themePreference = 'system';
   const MAX_AUTOPILOT_STEPS = 15;
+  const MAX_SAME_PAGE_FILLS = 2; // Stop AutoPilot before re-filling one page a third time.
+  const PAGE_CHANGE_TIMEOUT_MS = 8000; // Interactive "Fill & continue" wait.
+  const AUTOPILOT_PAGE_CHANGE_TIMEOUT_MS = 10000; // AutoPilot wait between steps.
+  const FRAME_SCRAPE_TIMEOUT_MS = 1500; // Deadline for an embedded frame's field list.
+  const FRAME_FILL_TIMEOUT_MS = 8000; // Deadline for an embedded frame's fill reply.
+  const CHIP_MOUNT_DEBOUNCE_MS = 300; // Page mutations are batched before the mount gate is re-read.
+  const CHIP_MOUNT_RETRY_MS = 15000; // Bounded window for a client-rendered form to appear.
   let fieldFailures = new Map();
+  // Cross-frame state. See the frame protocol on the responder and askChildFrames().
+  const FRAME_TOKEN = UTILS.generateId('frame'); // One nonce per page session (see registerChildResponder).
+  const FRAME_REQUESTS = new Map(); // Protocol type -> the batch of replies being awaited.
+  let scanFramesByTag = new Map(); // Tag -> { tag, window, index } for the scan in progress.
+  let frameFieldTags = new Set(); // Tags whose last scrape reported fields.
+  let childBlockingLabels = []; // Required-but-empty labels reported by embedded frames.
+  let lastFillIncludedFrames = false; // The last fill also wrote inside an embedded frame.
+  let frameNote = ''; // One note per scan about an embedded form that stayed silent.
+  let frameFields = []; // Child frame role: the fields this frame's own scrape reported.
+  let frameClearSnapshot = []; // Child frame role: what its last fill changed.
+  let chipObserver = null; // Watches a client-rendered page until the chip can mount.
+  let chipRetryTimer = null; // Expires the chip watch.
+  let chipMountDebounce = null; // Batches the chip watch's mount attempts.
+  const FRAME_REPLY_TYPES = {
+    AA_PROBE_RESULT: 'AA_PROBE',
+    AA_SCRAPE_RESULT: 'AA_SCRAPE',
+    AA_FILL_RESULT: 'AA_FILL',
+    AA_CLEAR_RESULT: 'AA_CLEAR',
+  };
+  const EMBEDDED_FORM_SILENT_NOTE = 'An embedded form did not respond; some of its fields may be missing from this review.';
+  // Only the top frame owns the panel, the backend call, and the orchestration;
+  // every other frame answers questions about itself. window.top is readable
+  // (never callable) across origins; an environment without it is treated as top.
+  const IS_TOP_FRAME = !window.top || window.top === window;
   let workspace = {
     opportunityId: null,
     packetId: null,
@@ -87,11 +127,15 @@
   }
 
   async function loadWorkspaceContext({ duplicateResolution = '', existingId = null } = {}) {
+    const payload = opportunityPayload();
     if (!duplicateResolution && workspace.opportunityId) {
       duplicateResolution = 'reuse';
       existingId = workspace.opportunityId;
+    } else if (!duplicateResolution && resolvedDuplicate?.url === payload.url) {
+      duplicateResolution = resolvedDuplicate.resolution;
+      existingId = resolvedDuplicate.existingId || null;
     }
-    const payload = opportunityPayload();
+    if (duplicateResolution) resolvedDuplicate = { url: payload.url, resolution: duplicateResolution, existingId };
     const policyQuery = `?url=${encodeURIComponent(payload.url)}&platform=${encodeURIComponent(payload.platform)}`;
     const duplicateQuery = `?url=${encodeURIComponent(payload.url)}&company=${encodeURIComponent(payload.company)}&role=${encodeURIComponent(payload.role)}`;
     const [versions, policy, duplicates] = await Promise.allSettled([
@@ -112,16 +156,480 @@
     }
     const matches = duplicates.status === 'fulfilled' ? (duplicates.value?.matches || []) : [];
     if (matches.length && !duplicateResolution) return { duplicates: matches };
-    const opportunity = await UTILS.workspaceCall('/opportunities/upsert', 'POST', {
-      ...payload,
-      status: 'preparing',
-      duplicate_resolution: duplicateResolution || 'create_new',
-      existing_id: existingId,
+    let opportunity = null;
+    try {
+      opportunity = await UTILS.workspaceCall('/opportunities/upsert', 'POST', {
+        ...payload,
+        status: 'preparing',
+        duplicate_resolution: duplicateResolution || 'create_new',
+        existing_id: existingId,
+      });
+    } catch (error) {
+      // Bookkeeping only: a failed upsert must never stop ordinary autofill.
+      console.warn('[AutoApply] Workspace context unavailable:', error);
+      // A recorded track that no longer exists must be chosen again; transient
+      // failures keep the user's answer and simply retry on the next scan.
+      if (/404|no longer exists/i.test(String(error?.message || ''))) resolvedDuplicate = null;
+    }
+    if (opportunity) {
+      const nextOpportunityId = workspaceId(opportunity, 'opportunity');
+      if (workspace.opportunityId && workspace.opportunityId !== nextOpportunityId) workspace.packetId = null;
+      workspace.opportunityId = nextOpportunityId;
+    }
+    // The duplicate question was already answered (or none was asked): reporting the
+    // matches here would make every later scan re-prompt the user mid-flow.
+    return { duplicates: [], opportunity };
+  }
+
+  /** Page text as the scraper/filler cached it; force=true takes a fresh reading. */
+  function pageText(force = false) {
+    return FILLER.bodyText(force) || '';
+  }
+
+  /** Employer-declared step progress, e.g. "Step 2 of 5". Null when the page states none. */
+  function declaredPageStep(force = false) {
+    const match = pageText(force).match(/step\s+(\d+)\s+of\s+(\d+)/i);
+    if (!match) return null;
+    return { step: Number(match[1]), total_steps: Number(match[2]) };
+  }
+
+  /**
+   * Identity of the page's fillable controls plus its step text. A real step change
+   * moves this; URL equality cannot, because SPA steps routinely keep the same URL.
+   */
+  function pageSignature() {
+    const identity = [];
+    document.querySelectorAll('input:not([type="hidden"]), select, textarea').forEach((element) => {
+      identity.push(`${element.tagName}:${element.getAttribute('type') || ''}:${element.getAttribute('name') || ''}:${element.id || ''}`);
     });
-    const nextOpportunityId = workspaceId(opportunity, 'opportunity');
-    if (workspace.opportunityId && workspace.opportunityId !== nextOpportunityId) workspace.packetId = null;
-    workspace.opportunityId = nextOpportunityId;
-    return { duplicates: matches, opportunity };
+    const declared = declaredPageStep(true);
+    return `${declared ? `${declared.step}/${declared.total_steps}` : ''}|${identity.join(',')}`;
+  }
+
+  /**
+   * Wait for the employer page to advance. Resolves true only when the field
+   * signature really changed, and always settles within timeoutMs, so a mutation
+   * observer that never fires can never leave the flow hanging.
+   */
+  function waitForPageChange(timeoutMs) {
+    if (pendingPageChange) pendingPageChange(false);
+    return new Promise((resolve) => {
+      let settled = false;
+      const settle = (changed) => {
+        if (settled) return;
+        settled = true;
+        if (pageChangeTimer) {
+          clearTimeout(pageChangeTimer);
+          pageChangeTimer = null;
+        }
+        if (activeObserver) {
+          activeObserver.cancel();
+          activeObserver = null;
+        }
+        if (pendingPageChange === settle) pendingPageChange = null;
+        resolve(changed);
+      };
+      pendingPageChange = settle;
+      const before = pageSignature();
+      if (activeObserver) {
+        activeObserver.cancel();
+        activeObserver = null;
+      }
+      activeObserver = FILLER.detectPageChange(() => {
+        if (pageSignature() === before) return; // An unrelated mutation, not a new step.
+        settle(true);
+      });
+      pageChangeTimer = setTimeout(() => settle(false), timeoutMs);
+    });
+  }
+
+  function fieldElement(field) {
+    return document.getElementById(field.id) || document.querySelector(`[data-autoapply-id="${CSS.escape(field.id)}"]`);
+  }
+
+  function fieldLabel(field) {
+    return field.label || field.placeholder || field.name || field.id;
+  }
+
+  /** Rendered check matching the filler's isRenderedControl, so both agree on "still blank". */
+  function isRenderedElement(element) {
+    if (!element || element.hidden) return false;
+    if (typeof element.getClientRects === 'function' && element.getClientRects().length === 0) return false;
+    const style = typeof getComputedStyle === 'function' ? getComputedStyle(element) : null;
+    return !style || (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0');
+  }
+
+  /** Human labels for fill attempts that failed, resolved through the scraped field list. */
+  function failedFieldLabels(failures) {
+    return (failures || []).map((failure) => {
+      const field = pageFields.find((candidate) => candidate.id === failure.field_id);
+      return field ? fieldLabel(field) : failure.field_id;
+    });
+  }
+
+  /**
+   * Names of the required fields still empty in `fields`. The top frame passes
+   * its merged page fields; a child frame passes the fields it owns, so it can
+   * report what it is still blocking on.
+   */
+  function unfilledRequiredFields(fields = pageFields) {
+    const missing = [];
+    for (const field of fields) {
+      if (!field.required) continue;
+      const element = fieldElement(field);
+      if (!isRenderedElement(element)) continue;
+      if (field.type === 'file') {
+        if (!element.files?.length) missing.push(fieldLabel(field));
+      } else if (field.type === 'radio' || field.type === 'checkbox') {
+        const group = element.name
+          ? [...document.querySelectorAll(`input[type="${field.type}"][name="${CSS.escape(element.name)}"]`)]
+          : [];
+        if (!(group.length ? group : [element]).some((input) => input.checked)) missing.push(fieldLabel(field));
+      } else if (!String(element.value ?? '').trim()) {
+        missing.push(fieldLabel(field));
+      }
+    }
+    return missing;
+  }
+
+  /**
+   * Everything still blocking advancement: the required fields of this document
+   * plus the ones the embedded frames reported as empty.
+   */
+  function blockingRequiredFields() {
+    return unfilledRequiredFields().concat(childBlockingLabels);
+  }
+
+  // --- Embedded frames -------------------------------------------------------
+  //
+  // Every frame receives the content scripts, so a form rendered inside an
+  // iframe (SmartRecruiters one-click apply) is invisible to the top document
+  // alone. The top frame owns the panel, the backend call, and the review; a
+  // child frame only answers questions about itself, over the frame protocol:
+  //
+  //   top -> child   { __autoapply, token, type: AA_PROBE|AA_SCRAPE|AA_FILL|AA_CLEAR, frameTag, instructions?, timeoutMs? }
+  //   child -> parent{ __autoapply, token, type: <type>_RESULT, frameTag, ok, fields?, job_description?, results?, blocking? }
+  //
+  // A child accepts a message only from its own parent and locks onto the first
+  // token it sees; a reply is accepted only from a window the top frame actually
+  // messaged, with this page session's token.
+
+  /** Direct child browsing contexts, tagged f1..fn in window.frames order. */
+  function childWindows() {
+    const list = [];
+    const frames = window.frames;
+    if (!frames || typeof frames.length !== 'number') return list;
+    for (let index = 0; index < frames.length; index += 1) {
+      if (frames[index]) list.push({ tag: `f${index + 1}`, window: frames[index], index });
+    }
+    return list;
+  }
+
+  /** The <iframe> behind a child frame, for judging whether it can hold a form. */
+  function frameElementFor(frame) {
+    try {
+      if (frame.window.frameElement) return frame.window.frameElement;
+    } catch (_) {
+      // A cross-origin frame does not expose its container; fall back to order.
+    }
+    return document.querySelectorAll('iframe, frame')[frame.index] || null;
+  }
+
+  /** A rendered frame box big enough to hold a form; a 1x1 tracker is not one. */
+  function isPlausibleFormBox(element) {
+    if (!element || !FILLER.isRenderedControl(element)) return false;
+    if (typeof element.getBoundingClientRect !== 'function') return false;
+    const box = element.getBoundingClientRect();
+    return box.width >= 120 && box.height >= 80;
+  }
+
+  /**
+   * Only a frame occupying a real, rendered box can be an embedded form. A 1x1
+   * tracking frame that never answers is not one and must not raise a note.
+   */
+  function isPlausibleFormFrame(frame) {
+    return isPlausibleFormBox(frameElementFor(frame));
+  }
+
+  /**
+   * Post one message to each requested child window and collect the replies that
+   * arrive before the deadline. The batch always settles: a frame that never
+   * answers is reported as missing instead of being awaited forever, and each
+   * frame is messaged exactly once per call.
+   * @returns {Promise<{ replies: Map<string, object>, missing: string[] }>}
+   */
+  function askChildFrames(type, requests, timeoutMs) {
+    return new Promise((resolve) => {
+      const superseded = FRAME_REQUESTS.get(type);
+      if (superseded) superseded.settle(); // A stuck earlier batch must not leak into this one.
+      const unreachable = [];
+      const entry = {
+        expected: new Set(requests.map(({ frame }) => frame.tag)),
+        replies: new Map(),
+        timer: null,
+        settled: false,
+        settle() {
+          if (entry.settled) return;
+          entry.settled = true;
+          clearTimeout(entry.timer);
+          if (FRAME_REQUESTS.get(type) === entry) FRAME_REQUESTS.delete(type);
+          resolve({ replies: entry.replies, missing: [...entry.expected, ...unreachable] });
+        },
+      };
+      FRAME_REQUESTS.set(type, entry);
+      for (const { frame, payload } of requests) {
+        try {
+          if (frame.window.closed) throw new Error('the frame is gone');
+          frame.window.postMessage({ __autoapply: true, token: FRAME_TOKEN, type, frameTag: frame.tag, timeoutMs, ...(payload || {}) }, '*');
+        } catch (error) {
+          console.warn(`[AutoApply] Could not reach embedded frame ${frame.tag}:`, error);
+          entry.expected.delete(frame.tag);
+          unreachable.push(frame.tag);
+        }
+      }
+      if (!entry.expected.size) {
+        entry.settle();
+        return;
+      }
+      entry.timer = setTimeout(() => entry.settle(), timeoutMs);
+    });
+  }
+
+  /** Register the top frame's side of the frame protocol. */
+  function watchFrameReplies() {
+    window.addEventListener('message', (event) => {
+      const data = event.data;
+      if (!data || data.__autoapply !== true || data.token !== FRAME_TOKEN) return;
+      const pending = FRAME_REQUESTS.get(FRAME_REPLY_TYPES[data.type]);
+      if (!pending) return; // A late reply, or one from a frame nobody asked.
+      if (scanFramesByTag.get(data.frameTag)?.window !== event.source) return; // Only windows we messaged.
+      pending.expected.delete(data.frameTag);
+      pending.replies.set(data.frameTag, data);
+      if (!pending.expected.size) pending.settle();
+    });
+  }
+
+  /**
+   * Surface a silent frame once, and only while it looks like an embedded form:
+   * tracking frames that never answer are normal on real pages.
+   */
+  function reportSilentFrames(tags) {
+    if (frameNote || !tags.length) return;
+    const plausible = tags.some((tag) => {
+      const frame = scanFramesByTag.get(tag);
+      return frame ? isPlausibleFormFrame(frame) : false;
+    });
+    if (plausible) frameNote = EMBEDDED_FORM_SILENT_NOTE;
+  }
+
+  /**
+   * Ask every direct child frame for the fields it owns and merge them under
+   * `fN:` ids. A frame with no fields is ignored entirely; a silent frame that
+   * looks like a form is surfaced once in the panel.
+   */
+  async function collectChildFrames() {
+    const frames = childWindows();
+    scanFramesByTag = new Map(frames.map((frame) => [frame.tag, frame]));
+    frameFieldTags = new Set();
+    childBlockingLabels = []; // A new scan invalidates the previous step's answers.
+    frameNote = '';
+    if (!frames.length) return { fields: [], job_description: '' };
+    const { replies, missing } = await askChildFrames(
+      'AA_SCRAPE',
+      frames.map((frame) => ({ frame, payload: {} })),
+      FRAME_SCRAPE_TIMEOUT_MS,
+    );
+    const fields = [];
+    let jobDescription = '';
+    for (const frame of frames) {
+      const reply = replies.get(frame.tag);
+      const own = Array.isArray(reply?.fields) ? reply.fields : [];
+      if (!own.length) continue;
+      frameFieldTags.add(frame.tag);
+      for (const field of own) fields.push({ ...field, id: `${frame.tag}:${field.id}`, frameTag: frame.tag });
+      if (!jobDescription && reply.job_description) jobDescription = reply.job_description;
+    }
+    reportSilentFrames(missing);
+    return { fields, job_description: jobDescription };
+  }
+
+  /**
+   * Split instructions by owner: this document, or the embedded frame whose tag
+   * prefixes the id. An id is only treated as a frame id when the prefix is a
+   * frame that really reported fields, so a local id can never be stolen.
+   */
+  function splitInstructions(instructions) {
+    const mine = [];
+    const byFrame = new Map();
+    for (const instruction of instructions) {
+      const id = String(instruction?.field_id || '');
+      const separator = id.indexOf(':');
+      const tag = separator === -1 ? '' : id.slice(0, separator);
+      if (!tag || !frameFieldTags.has(tag)) {
+        mine.push(instruction);
+        continue;
+      }
+      if (!byFrame.has(tag)) byFrame.set(tag, []);
+      byFrame.get(tag).push({ ...instruction, field_id: id.slice(separator + 1) });
+    }
+    return { mine, byFrame };
+  }
+
+  /**
+   * Route each embedded frame's instructions back to it, and merge its answer
+   * into the page-level result. The child reports local field ids and labels, so
+   * failures are namespaced again here to match the review rows.
+   */
+  async function fillChildFrames(byFrame) {
+    childBlockingLabels = [];
+    lastFillIncludedFrames = false;
+    const merged = { filled: 0, skipped: 0, failed: 0, failures: [] };
+    const requests = [];
+    for (const [tag, instructions] of byFrame) {
+      const frame = scanFramesByTag.get(tag);
+      if (frame) requests.push({ frame, payload: { instructions } });
+    }
+    if (!requests.length) return merged;
+    // The frames hold their own copy of what this fill changes, so undo has to
+    // reach them even when the reply is late.
+    lastFillIncludedFrames = true;
+    const { replies, missing } = await askChildFrames('AA_FILL', requests, FRAME_FILL_TIMEOUT_MS);
+    for (const { frame } of requests) {
+      const reply = replies.get(frame.tag);
+      if (!reply) continue;
+      const results = reply.results || {};
+      merged.filled += results.filled || 0;
+      merged.skipped += results.skipped || 0;
+      merged.failed += results.failed || 0;
+      for (const failure of results.failures || []) {
+        merged.failures.push({ ...failure, field_id: `${frame.tag}:${failure.field_id}` });
+      }
+      if (Array.isArray(reply.blocking)) childBlockingLabels.push(...reply.blocking);
+    }
+    reportSilentFrames(missing);
+    return merged;
+  }
+
+  /** Ask the frames that own fields to put back what the last fill changed. */
+  async function clearChildFrames() {
+    const frames = [...frameFieldTags].map((tag) => scanFramesByTag.get(tag)).filter(Boolean);
+    if (!frames.length) return;
+    await askChildFrames('AA_CLEAR', frames.map((frame) => ({ frame, payload: {} })), FRAME_FILL_TIMEOUT_MS);
+  }
+
+  /**
+   * Child frame role: answer the top frame's questions about this document. No
+   * panel, no chip, no scan, and no backend call happens in a child frame.
+   */
+  function registerChildResponder() {
+    let acceptedToken = null; // The first token this frame saw; later mismatches are ignored.
+    window.addEventListener('message', async (event) => {
+      const data = event.data;
+      if (!data || data.__autoapply !== true) return;
+      if (event.source !== window.parent) return; // Only this frame's parent may ask.
+      if (acceptedToken === null) acceptedToken = data.token;
+      else if (data.token !== acceptedToken) return;
+      const frameTag = data.frameTag || null;
+      const reply = (payload) => {
+        try {
+          event.source.postMessage({ __autoapply: true, token: acceptedToken, frameTag, ...payload }, '*');
+        } catch (error) {
+          console.warn('[AutoApply] Could not answer the top frame:', error);
+        }
+      };
+      if (data.type === 'AA_PROBE' || data.type === 'AA_SCRAPE') {
+        const scrape = SCRAPER.scrapeFormFields();
+        frameFields = scrape.fields;
+        reply({
+          type: data.type === 'AA_PROBE' ? 'AA_PROBE_RESULT' : 'AA_SCRAPE_RESULT',
+          ok: true,
+          fields: frameFields,
+          job_description: scrape.job_description,
+        });
+        return;
+      }
+      if (data.type === 'AA_FILL') {
+        // Only ids this frame scraped and stamped may be touched: a message can
+        // never make a frame fill a control that was not in its own schema.
+        const known = new Set(frameFields.map((field) => field.id));
+        const instructions = (Array.isArray(data.instructions) ? data.instructions : [])
+          .filter((instruction) => known.has(instruction?.field_id));
+        frameClearSnapshot = captureFillSnapshot(instructions, frameFields);
+        const results = await FILLER.fillAllFields(instructions);
+        reply({ type: 'AA_FILL_RESULT', ok: true, results, blocking: unfilledRequiredFields(frameFields) });
+        return;
+      }
+      if (data.type === 'AA_CLEAR') {
+        restoreFillSnapshot(frameClearSnapshot);
+        frameClearSnapshot = [];
+        reply({ type: 'AA_CLEAR_RESULT', ok: true });
+      }
+    });
+  }
+
+  /** The values a fill is about to change, so the change can be undone again. */
+  function captureFillSnapshot(instructions, fields = pageFields) {
+    return instructions.map((instruction) => {
+      const field = fields.find((candidate) => candidate.id === instruction.field_id);
+      const element = field ? fieldElement(field) : null;
+      if (!field || !element || field.type === 'file' || instruction.action === 'skip') return null;
+      return {
+        element,
+        type: field.type,
+        value: element.hasAttribute?.('contenteditable') ? element.textContent : element.value,
+        checked: Boolean(element.checked),
+      };
+    }).filter(Boolean);
+  }
+
+  /** Put back the values captured before a fill. */
+  function restoreFillSnapshot(snapshot) {
+    for (const entry of snapshot) {
+      const { element } = entry;
+      if (!element?.isConnected) continue;
+      if (entry.type === 'checkbox' || entry.type === 'radio') element.checked = entry.checked;
+      else if (element.hasAttribute?.('contenteditable')) element.textContent = entry.value || '';
+      else element.value = entry.value || '';
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  }
+
+  function apiErrorDetail(error) {
+    const raw = String(error?.message || error || '').trim();
+    const jsonStart = raw.indexOf('{');
+    if (jsonStart !== -1) {
+      try {
+        const body = JSON.parse(raw.slice(jsonStart));
+        const detail = body?.detail ?? body?.ai_error;
+        if (typeof detail === 'string' && detail.trim()) return detail.trim();
+      } catch (_) {
+        // Not a JSON error body; fall through to the raw message.
+      }
+    }
+    return raw;
+  }
+
+  async function backendBaseUrl() {
+    try {
+      return await UTILS.getApiBase();
+    } catch (_) {
+      return 'the local backend';
+    }
+  }
+
+  /** Turn a backend failure into actionable copy instead of a raw status code. */
+  async function preparationErrorMessage(error) {
+    const raw = String(error?.message || error || '');
+    const detail = apiErrorDetail(error);
+    if (raw.includes('404')) return 'Finish profile setup before preparing this application.';
+    if (/failed to fetch|networkerror|load failed/i.test(raw)) {
+      return `Start the local AutoApply backend at ${await backendBaseUrl()}, then try again.`;
+    }
+    if (/\b(429|502|503)\b/.test(raw) || /provider|api key|not configured|rate.?limit/i.test(detail)) {
+      return `AI suggestions are unavailable: ${detail}`;
+    }
+    return `Could not prepare this application: ${detail}`;
   }
 
   function policyBlocksAutopilot() {
@@ -244,8 +752,7 @@
   }
 
   function submissionReceipt() {
-    const text = document.body?.innerText || '';
-    const match = text.match(/(application (?:has been )?(?:submitted|received)|thank you for applying|we received your application)/i);
+    const match = pageText().match(/(application (?:has been )?(?:submitted|received)|thank you for applying|we received your application)/i);
     return { url: window.location.href, title: document.title, confirmation_text: match ? match[1] : '' };
   }
 
@@ -279,13 +786,46 @@
 
   /**
    * Start the scan, analysis, and fill-preparation flow.
+   * Concurrent triggers are ignored; internal callers that refresh a displayed
+   * panel after a real page change pass `force`.
    */
-  async function startScanningFlow() {
+  async function startScanningFlow({ force = false } = {}) {
+    if (flowInFlight && !force) {
+      console.log('[AutoApply] A scan is already running; ignoring the duplicate trigger.');
+      return false;
+    }
+    flowInFlight = true;
+    try {
+      await runScanningFlow();
+      return true;
+    } finally {
+      flowInFlight = false;
+    }
+  }
+
+  /**
+   * Scrape this document and every embedded frame, and refresh the review state
+   * they feed. Embedded fields keep their `fN:` id so an instruction can always
+   * be routed back to the frame that owns it.
+   */
+  async function scanPageFields() {
+    const scrapeResult = SCRAPER.scrapeFormFields();
+    const embedded = await collectChildFrames();
+    pageFields = scrapeResult.fields.concat(embedded.fields);
+    const description = scrapeResult.job_description || embedded.job_description;
+    if (description) jdText = description;
+    pageText(true); // Refresh the filler's cached page text for this scan.
+    return pageFields;
+  }
+
+  async function runScanningFlow() {
     removeOverlay();
     removeReadyChip();
     window.__autoapply_active = true;
     hasFilledCurrentPage = false;
     lastFillSnapshot = [];
+    lastFillIncludedFrames = false;
+    aiWarning = '';
 
     // Create shadow DOM host to isolate overlay from host page CSS
     shadowHost = document.createElement('div');
@@ -308,15 +848,20 @@
     // Create the overlay container element inside shadow root
     overlayContainer = document.createElement('div');
     overlayContainer.className = 'autoapply-overlay';
+    overlayContainer.setAttribute('role', 'dialog');
+    overlayContainer.setAttribute('aria-modal', 'true');
+    overlayContainer.setAttribute('aria-label', 'AutoApply application review');
+    overlayContainer.tabIndex = -1;
     applyOverlayTheme();
     shadowRoot.appendChild(overlayContainer);
+    previousFocus = document.activeElement;
+    overlayContainer.focus({ preventScroll: true });
+    document.addEventListener('keydown', handleOverlayKeydown, true);
 
     showLoading('Scanning this page and preparing your review…');
 
     try {
-      const scrapeResult = SCRAPER.scrapeFormFields();
-      pageFields = scrapeResult.fields;
-      jdText = scrapeResult.job_description;
+      await scanPageFields();
     } catch (err) {
       console.error('[AutoApply] Scraper error:', err);
       showError('Failed to scan page fields. Check console for details.');
@@ -327,12 +872,7 @@
     const title = document.title;
     const platform = UTILS.detectPlatform(url);
     companyName = UTILS.extractCompany(url, title);
-    
-    // Extract a cleaner role name from the page title
-    roleName = title
-      .split(/ - | at | \| /i)[0]
-      .replace(/Apply for|Job Application for|Opening for/i, '')
-      .trim();
+    roleName = UTILS.extractRole(url, title, document);
 
     try {
       const context = await loadWorkspaceContext();
@@ -344,20 +884,21 @@
       await prepareCurrentPage({ url, title, platform });
     } catch (err) {
       console.error('[AutoApply] Backend connection error:', err);
-      if (err.message.includes('404')) showError('Finish profile setup before preparing this application.');
-      else if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) showError('Start the local AutoApply backend on port 8000, then try again.');
-      else showError(`Could not prepare this application: ${err.message}`);
+      showError(await preparationErrorMessage(err));
     }
   }
 
   async function prepareCurrentPage({ url = window.location.href, title = document.title, platform = UTILS.detectPlatform(window.location.href), analyzeFit = true } = {}) {
+    const declared = declaredPageStep();
     const formSchema = {
-      url, platform, page_title: title, step: 1, total_steps: 1,
+      url, platform, page_title: title,
+      step: declared?.step || 1, total_steps: declared?.total_steps ?? null,
       fields: pageFields, job_description: jdText,
       opportunity_id: workspace.opportunityId,
       resume_version_id: workspace.selectedResumeVersionId,
     };
     const autofillRes = await UTILS.apiCall('/api/autofill', 'POST', formSchema);
+    aiWarning = autofillRes.ai_error || '';
     currentInstructions = autofillRes.instructions || [];
     preparationSummary = {
       ready_count: autofillRes.ready_count || currentInstructions.filter((item) => !item.review_required).length,
@@ -392,13 +933,17 @@
     overlayContainer.innerHTML = `
       <div class="autoapply-header"><div class="autoapply-logo">${BRAND_MARK}<span>AutoApply</span></div><button class="autoapply-header-btn autoapply-close-btn" title="Close">✕</button></div>
       <div class="autoapply-duplicate-choice"><p class="autoapply-kicker">Already tracked?</p><h2>${UTILS.escapeHTML(first.company || companyName)} · ${UTILS.escapeHTML(first.role || roleName)}</h2><p>${UTILS.escapeHTML(first.match_reason || 'This looks like an application already in your workspace.')}</p><div class="autoapply-choice-actions"><button class="autoapply-btn autoapply-btn-primary autoapply-reuse-btn">Open tracked application</button><button class="autoapply-btn autoapply-btn-secondary autoapply-new-attempt-btn">Create another attempt</button></div></div>`;
-    overlayContainer.querySelector('.autoapply-close-btn').addEventListener('click', removeOverlay);
+    overlayContainer.querySelector('.autoapply-close-btn').addEventListener('click', dismissOverlay);
     overlayContainer.querySelector('.autoapply-reuse-btn').addEventListener('click', async () => {
       showLoading('Opening the tracked application…');
       try {
         const response = await browser.runtime.sendMessage({ type:'OPEN_WORKSPACE_RECORD', opportunity_id:first.id });
         if (response?.status !== 'success') throw new Error(response?.error || 'Could not open the workspace record.');
-        removeOverlay();
+        // This flow now belongs to the tracked record; a later step must not ask again.
+        workspace.opportunityId = first.id;
+        workspace.packetId = null;
+        resolvedDuplicate = { url: window.location.href, resolution: 'reuse', existingId: first.id };
+        dismissOverlay();
       }
       catch (error) { showError(error.message); }
     });
@@ -411,14 +956,12 @@
 
   async function prepareApplicationSilently(message = {}) {
     try {
-      const scrapeResult = SCRAPER.scrapeFormFields();
-      pageFields = scrapeResult.fields;
-      jdText = scrapeResult.job_description;
+      await scanPageFields();
       const url = window.location.href;
       const title = document.title;
       const platform = UTILS.detectPlatform(url);
       companyName = UTILS.extractCompany(url, title);
-      roleName = title.split(/ - | at | \| /i)[0].replace(/Apply for|Job Application for|Opening for/i, '').trim();
+      roleName = UTILS.extractRole(url, title, document);
       const context = await loadWorkspaceContext({ duplicateResolution:message.duplicate_resolution || '', existingId:message.existing_id || null });
       if (context?.duplicates?.length && !message.duplicate_resolution) {
         return { ok:true, status:'duplicate', matches:context.duplicates, title:`${roleName} · ${companyName}` };
@@ -443,18 +986,74 @@
     if (!/^https?:/i.test(window.location.href)) return false;
     const identity = `${window.location.href} ${document.title}`.toLowerCase();
     const knownPage = /(workdayjobs|greenhouse|lever\.co|ashbyhq|icims|smartrecruiters|taleo|oraclecloud|darwinbox|keka|\/apply(?:\/|\?|$)|application)/.test(identity);
+    if (!knownPage) return false;
+    // The filler's own visibility predicate: offsetParent is null for a
+    // fixed-position control, which would hide a real form from this gate.
     const visibleFields = [...document.querySelectorAll('input:not([type="hidden"]),select,textarea')]
-      .filter((element) => element.offsetParent !== null && !element.disabled).length;
-    return knownPage && visibleFields >= 2;
+      .filter((element) => !element.disabled && FILLER.isRenderedControl(element)).length;
+    if (visibleFields >= 2) return true;
+    // A form rendered entirely inside an iframe (SmartRecruiters one-click
+    // apply) leaves this document with no fields of its own.
+    return [...document.querySelectorAll('iframe, frame')].some(isPlausibleFormBox);
   }
 
   function removeReadyChip() {
     if (readyChipHost) readyChipHost.remove();
     readyChipHost = null;
+    stopReadyChipWatch();
+  }
+
+  /** Drop the chip watch: it is only live while the chip is still undecided. */
+  function stopReadyChipWatch() {
+    if (chipObserver) {
+      chipObserver.disconnect();
+      chipObserver = null;
+    }
+    if (chipRetryTimer) {
+      clearTimeout(chipRetryTimer);
+      chipRetryTimer = null;
+    }
+    if (chipMountDebounce) {
+      clearTimeout(chipMountDebounce);
+      chipMountDebounce = null;
+    }
+  }
+
+  /**
+   * Mount the chip, and keep re-checking while the page is still not
+   * qualifying. A single attempt 700 ms after injection missed Ashby, whose
+   * form is client-rendered after that: the gate is re-read on page mutations
+   * for a bounded window, and the watch ends as soon as the chip mounts or a
+   * flow starts.
+   */
+  function ensureReadyChip() {
+    if (readyChipHost || window.__autoapply_active || dismissedUrl === window.location.href) {
+      stopReadyChipWatch();
+      return;
+    }
+    mountReadyChip();
+    if (readyChipHost) {
+      stopReadyChipWatch();
+      return;
+    }
+    if (chipObserver || !document.body) return;
+    chipObserver = new MutationObserver(scheduleReadyChipCheck);
+    chipObserver.observe(document.body, { childList: true, subtree: true });
+    chipRetryTimer = setTimeout(stopReadyChipWatch, CHIP_MOUNT_RETRY_MS);
+  }
+
+  /** Page mutations arrive in bursts; one pending re-check is enough. */
+  function scheduleReadyChipCheck() {
+    if (chipMountDebounce) return;
+    chipMountDebounce = setTimeout(() => {
+      chipMountDebounce = null;
+      ensureReadyChip();
+    }, CHIP_MOUNT_DEBOUNCE_MS);
   }
 
   function mountReadyChip() {
     if (readyChipHost || window.__autoapply_active || !looksLikeApplicationPage()) return;
+    if (dismissedUrl === window.location.href) return; // The user closed the panel on this URL.
     readyChipHost = document.createElement('div');
     readyChipHost.id = 'autoapply-ready-chip-host';
     document.body.appendChild(readyChipHost);
@@ -466,7 +1065,7 @@
     root.innerHTML = `<style>
       button{position:fixed;right:18px;bottom:18px;z-index:2147483647;display:flex;align-items:center;gap:9px;min-height:44px;padding:0 14px;border:1px solid ${chipColors.border};border-radius:8px;color:${chipColors.text};background:${chipColors.background};box-shadow:0 16px 42px rgba(0,0,0,.25);font:750 12px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer}
       button:hover{border-color:${chipColors.action};background:${chipColors.hover}}.autoapply-logo-icon{display:block;width:22px;height:22px;filter:drop-shadow(2px 2px 0 rgba(0,0,0,.16));transform:rotate(-1deg)}.autoapply-logo-icon svg{display:block;width:100%;height:100%}button:focus-visible{outline:3px solid ${chipColors.focus};outline-offset:3px}@media(prefers-reduced-motion:no-preference){button{animation:arrive .28s ease-out}@keyframes arrive{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}}</style><button type="button" aria-label="Prepare this application with AutoApply">${BRAND_MARK}Ready to prepare</button>`;
-    root.querySelector('button').addEventListener('click', startScanningFlow);
+    root.querySelector('button').addEventListener('click', () => startScanningFlow());
   }
 
   /**
@@ -479,18 +1078,43 @@
       dragMoveHandler = null;
       dragUpHandler = null;
     }
+    document.removeEventListener('keydown', handleOverlayKeydown, true);
+    const focusWasInside = Boolean(shadowHost) && document.activeElement === shadowHost;
     if (shadowHost) {
       shadowHost.remove();
       shadowHost = null;
       shadowRoot = null;
       overlayContainer = null;
     }
+    if (focusWasInside && previousFocus?.isConnected && typeof previousFocus.focus === 'function') {
+      previousFocus.focus({ preventScroll: true });
+    }
+    previousFocus = null;
+    if (pendingPageChange) pendingPageChange(false);
+    if (pageChangeTimer) {
+      clearTimeout(pageChangeTimer);
+      pageChangeTimer = null;
+    }
     if (activeObserver) {
-      activeObserver.disconnect();
+      activeObserver.cancel();
       activeObserver = null;
     }
+    FILLER.clearUploadHighlight();
     window.__autoapply_active = false;
-    setTimeout(mountReadyChip, 350);
+    setTimeout(ensureReadyChip, 350);
+  }
+
+  /** Close the panel because the user asked for it; suppresses the chip on this URL. */
+  function dismissOverlay() {
+    dismissedUrl = window.location.href;
+    removeOverlay();
+  }
+
+  /** Escape closes the panel, except while the field editor owns the key. */
+  function handleOverlayKeydown(event) {
+    if (event.key !== 'Escape' || !overlayContainer) return;
+    if (overlayContainer.querySelector('.autoapply-field-input')) return;
+    dismissOverlay();
   }
 
   /**
@@ -514,7 +1138,7 @@
       </div>
     `;
 
-    overlayContainer.querySelector('.autoapply-close-btn').addEventListener('click', removeOverlay);
+    overlayContainer.querySelector('.autoapply-close-btn').addEventListener('click', dismissOverlay);
   }
 
   /**
@@ -537,7 +1161,7 @@
       </div>
     `;
 
-    overlayContainer.querySelector('.autoapply-close-btn').addEventListener('click', removeOverlay);
+    overlayContainer.querySelector('.autoapply-close-btn').addEventListener('click', dismissOverlay);
   }
 
   /**
@@ -574,6 +1198,8 @@
         <div class="autoapply-prep-summary"><span>${preparationSummary.ready_count} ready</span><span>${preparationSummary.review_count} review</span><span>${preparationSummary.skipped_count} skipped</span></div>
       </div>
       ${renderDuplicateWarning(cachedDuplicateRes)}
+      ${renderAiWarning()}
+      ${renderFrameNote()}
       ${renderWorkspaceContext()}
       ${renderFitScoreSection()}
       <div class="autoapply-fields">
@@ -583,14 +1209,14 @@
         <button class="autoapply-btn autoapply-btn-primary autoapply-primary-action-btn" ${hasFilledCurrentPage && pageState.isLast && !confirmation ? 'disabled' : ''}>${primaryLabel}</button>
         <details class="autoapply-more-actions"><summary aria-label="More actions">•••</summary><div class="autoapply-action-menu">
           <button type="button" class="autoapply-fill-only-btn">Fill without continuing</button>
-          ${lastFillSnapshot.length ? '<button type="button" class="autoapply-undo-btn">Undo last fill</button>' : ''}
+          ${lastFillSnapshot.length || lastFillIncludedFrames ? '<button type="button" class="autoapply-undo-btn">Undo last fill</button>' : ''}
           <button type="button" class="autoapply-autopilot-btn" ${policyBlocksAutopilot() ? 'disabled title="Blocked by workspace policy"' : ''}>Continue automatically</button>
         </div></details>
       </div>
     `;
 
     // Wire up events
-    overlayContainer.querySelector('.autoapply-close-btn').addEventListener('click', removeOverlay);
+    overlayContainer.querySelector('.autoapply-close-btn').addEventListener('click', dismissOverlay);
     overlayContainer.querySelector('.autoapply-minimize-btn').addEventListener('click', toggleMinimize);
 
     // Enable drag
@@ -660,20 +1286,105 @@
     });
   }
 
+  const CONFIRMATION_PATTERN = /(application (?:has been )?(?:submitted|received)|thank you for applying|we received your application)/i;
+
+  /**
+   * Decide whether the employer page is a post-submission confirmation. The phrase
+   * also occurs in job descriptions and footers, so it must sit in a heading/alert
+   * region and the page must have no remaining fillable application fields. The
+   * record itself is still only written after the user confirms in the dialog.
+   */
   function isSubmissionConfirmationPage() {
     if (receiptRecorded) return false;
-    const text = document.body?.innerText || '';
-    return /(application (?:has been )?(?:submitted|received)|thank you for applying|we received your application)/i.test(text);
+    if (!CONFIRMATION_PATTERN.test(pageText())) return false;
+    const claimed = [...document.querySelectorAll('h1, h2, [role="alert"], [role="status"], main')]
+      .some((region) => CONFIRMATION_PATTERN.test(region.textContent || ''));
+    return claimed && !hasFillableApplicationFields();
+  }
+
+  /** Visible application fields that are not site chrome (search, nav, header, footer). */
+  function hasFillableApplicationFields() {
+    return [...document.querySelectorAll('input:not([type="hidden"]), select, textarea')].some((element) => {
+      if (element.type === 'search') return false;
+      if (element.disabled || !FILLER.isRenderedControl(element)) return false;
+      return !element.closest('nav, header, footer, [role="search"]');
+    });
+  }
+
+  function renderAiWarning() {
+    if (!aiWarning) return '';
+    return `
+      <div class="autoapply-ai-warning" role="status" style="margin-top:8px;padding:8px;border-radius:6px;border:1px solid #f5c451;background:rgba(245,196,81,.12);font-size:11px;color:#f5c451;">
+        AI suggestions are unavailable: ${UTILS.escapeHTML(aiWarning)} Profile fields still fill from your saved data; review anything missing before submitting.
+      </div>
+    `;
+  }
+
+  /** One note per scan when an embedded form never answered the field request. */
+  function renderFrameNote() {
+    if (!frameNote) return '';
+    return `
+      <div class="autoapply-frame-note" role="status" style="margin-top:8px;padding:8px;border-radius:6px;border:1px solid #8fa2c9;background:rgba(143,162,201,.12);font-size:11px;">
+        ${UTILS.escapeHTML(frameNote)}
+      </div>
+    `;
+  }
+
+  /**
+   * A policy or unsupported skip is a row AutoApply declined on purpose — a
+   * sensitive/demographic question or a third party's details. A skip with no
+   * such source (a missing profile value, a failed mapping) is a gap, not a
+   * policy decision, and stays visible with its own reason.
+   */
+  const POLICY_SKIP_SOURCE = /^(policy|unsupported|sensitive)/i;
+
+  function isPolicySkip(instruction) {
+    if (instruction.action !== 'skip') return false;
+    return POLICY_SKIP_SOURCE.test(String(instruction.source || ''));
+  }
+
+  function instructionFor(fieldId) {
+    return currentInstructions.find((item) => item.field_id === fieldId)
+      || { field_id: fieldId, action: 'skip', review_required: true };
   }
 
   function renderFieldGroups() {
-    const entries = pageFields.map((field, idx) => ({ field, idx, instruction:currentInstructions.find((item) => item.field_id === field.id) || { action:'skip', review_required:true } }));
+    const review = [];
+    const ready = [];
+    const skipped = [];
+    const collapsed = [];
+    pageFields.forEach((field, idx) => {
+      const instruction = instructionFor(field.id);
+      const entry = { field, idx, instruction };
+      if (instruction.action !== 'skip') {
+        (instruction.review_required ? review : ready).push(entry);
+        return;
+      }
+      // A required field we will not fill is a blocker, so it stays in the group
+      // the user actually sees rather than behind a collapsed summary.
+      if (field.required) {
+        review.push(entry);
+        return;
+      }
+      (isPolicySkip(instruction) ? collapsed : skipped).push(entry);
+    });
     const groups = [
-      ['review', 'Needs review', 'Check these before filling', entries.filter((entry) => entry.instruction.review_required && entry.instruction.action !== 'skip'), true],
-      ['ready', 'Ready to fill', 'Verified profile facts and approved answers', entries.filter((entry) => !entry.instruction.review_required && entry.instruction.action !== 'skip'), false],
-      ['skipped', 'Skipped', 'Left untouched by policy or missing information', entries.filter((entry) => entry.instruction.action === 'skip'), false],
-    ];
-    return groups.filter(([, , , items]) => items.length).map(([kind, title, copy, items, open]) => `<details class="autoapply-field-group autoapply-field-group-${kind}" ${open ? 'open' : ''}><summary><span><strong>${title}</strong><small>${copy}</small></span><b>${items.length}</b></summary><div>${items.map((entry) => renderFieldRow(entry.field, entry.idx)).join('')}</div></details>`).join('') || '<div class="autoapply-empty-fields">No fillable fields were found on this page.</div>';
+      ['review', 'Needs review', 'Check these before filling', review, true],
+      ['ready', 'Ready to fill', 'Verified profile facts and approved answers', ready, false],
+      ['skipped', 'Skipped', 'Left untouched because the information is missing', skipped, false],
+    ].filter(([, , , items]) => items.length)
+      .map(([kind, title, copy, items, open]) => `<details class="autoapply-field-group autoapply-field-group-${kind}" ${open ? 'open' : ''}><summary><span><strong>${title}</strong><small>${copy}</small></span><b>${items.length}</b></summary><div>${items.map((entry) => renderFieldRow(entry.field, entry.idx)).join('')}</div></details>`);
+    if (collapsed.length) {
+      // One summary row instead of a wall of demographic fields: the reasons are
+      // still here, one expansion away.
+      groups.push(`
+        <details class="autoapply-field-group autoapply-field-group-collapsed">
+          <summary><span><strong>${collapsed.length} field${collapsed.length === 1 ? '' : 's'} left for you</strong><small>Sensitive or policy-skipped — expand for each reason</small></span><b>${collapsed.length}</b></summary>
+          <div>${collapsed.map((entry) => renderFieldRow(entry.field, entry.idx)).join('')}</div>
+        </details>
+      `);
+    }
+    return groups.join('') || '<div class="autoapply-empty-fields">No fillable fields were found on this page.</div>';
   }
 
   /**
@@ -846,10 +1557,18 @@
       </div>
     ` : '';
     const failure = fieldFailures.get(field.id);
-    const recoveryHtml = failure ? `
+    // A field inside an embedded frame has no element in this document, so the
+    // inline editor cannot reach it: the reason still shows, and the user edits
+    // it on the page itself.
+    const failureHtml = failure ? `
       <div style="margin-top:6px;font-size:11px;color:#fca5a5;">Could not fill: ${UTILS.escapeHTML(failure.reason)}</div>
+    ` : '';
+    const recoveryHtml = failure && !field.frameTag ? `
       <button class="autoapply-recover-btn" data-idx="${idx}" style="margin-top:4px;font-size:11px;">Edit &amp; teach recovery</button>
     ` : '';
+    const editHtml = field.frameTag
+      ? '<span class="autoapply-edit-note" style="flex-shrink:0;margin-top:2px;font-size:10px;color:#8b93a7;white-space:nowrap;">edit on the page</span>'
+      : `<button class="autoapply-edit-btn" data-idx="${idx}" title="Edit Value">✎</button>`;
     const source = inst.source || (inst.action === 'skip' ? 'policy' : 'ai');
     const sourceLabel = source.startsWith('profile') ? 'Verified profile' : source.startsWith('answer_vault') ? 'Approved answer' : source.startsWith('resume') ? 'Resume file' : source.startsWith('learned') ? 'Learned correction' : source.startsWith('policy') ? 'Review policy' : 'AI suggestion';
 
@@ -862,9 +1581,10 @@
           <div class="autoapply-field-source">${UTILS.escapeHTML(sourceLabel)} · ${UTILS.escapeHTML(inst.confidence || 'unknown')} confidence</div>
           ${toggleHtml}
           ${coverLetterBtnHtml}
+          ${failureHtml}
           ${recoveryHtml}
         </div>
-        <button class="autoapply-edit-btn" data-idx="${idx}" title="Edit Value">✎</button>
+        ${editHtml}
       </div>
     `;
   }
@@ -875,12 +1595,16 @@
    * Switch a field row into editing mode with an input/select.
    */
   function startEditingField(idx) {
+    const field = pageFields[idx];
+    if (!field) return;
+    if (field.frameTag) {
+      // The element lives in another document; only the page can edit it.
+      showStatus('This field is inside an embedded form. Edit it on the page itself.', true);
+      return;
+    }
     const row = overlayContainer.querySelector(`#row_${idx}`);
     const valDiv = overlayContainer.querySelector(`#val_${idx}`);
     if (!row || !valDiv) return;
-
-    const field = pageFields[idx];
-    if (!field) return;
 
     const fieldId = field.id;
     const inst = currentInstructions.find(i => i.field_id === fieldId) || {
@@ -1014,37 +1738,29 @@
 
   async function fillCurrentInstructions(stage) {
     fieldFailures.clear();
-    lastFillSnapshot = currentInstructions.map((instruction) => {
-      const field = pageFields.find((candidate) => candidate.id === instruction.field_id);
-      const element = document.getElementById(instruction.field_id) || document.querySelector(`[data-autoapply-id="${CSS.escape(instruction.field_id)}"]`);
-      if (!field || !element || field.type === 'file' || instruction.action === 'skip') return null;
-      return {
-        element,
-        type: field.type,
-        value: element.hasAttribute?.('contenteditable') ? element.textContent : element.value,
-        checked: Boolean(element.checked),
-      };
-    }).filter(Boolean);
-    const result = await FILLER.fillAllFields(currentInstructions, {
+    const { mine, byFrame } = splitInstructions(currentInstructions);
+    lastFillSnapshot = captureFillSnapshot(mine);
+    const result = await FILLER.fillAllFields(mine, {
       uploadHandler: attachSelectedResume,
     });
-    for (const failure of result.failures || []) fieldFailures.set(failure.field_id, failure);
+    // Embedded fields are filled by the frame that owns them; its answer joins
+    // the page-level counts so the panel and the gate see one result.
+    const embedded = await fillChildFrames(byFrame);
+    result.filled += embedded.filled;
+    result.skipped += embedded.skipped;
+    result.failed += embedded.failed;
+    result.failures = [...(result.failures || []), ...embedded.failures];
+    for (const failure of result.failures) fieldFailures.set(failure.field_id, failure);
     await saveWorkspacePacket(stage, result);
     return result;
   }
 
-  function undoLastFill() {
-    if (!lastFillSnapshot.length) return;
-    for (const snapshot of lastFillSnapshot) {
-      const { element } = snapshot;
-      if (!element?.isConnected) continue;
-      if (snapshot.type === 'checkbox' || snapshot.type === 'radio') element.checked = snapshot.checked;
-      else if (element.hasAttribute?.('contenteditable')) element.textContent = snapshot.value || '';
-      else element.value = snapshot.value || '';
-      element.dispatchEvent(new Event('input', { bubbles:true }));
-      element.dispatchEvent(new Event('change', { bubbles:true }));
-    }
+  async function undoLastFill() {
+    if (!lastFillSnapshot.length && !lastFillIncludedFrames) return;
+    restoreFillSnapshot(lastFillSnapshot);
     lastFillSnapshot = [];
+    await clearChildFrames();
+    lastFillIncludedFrames = false;
     hasFilledCurrentPage = false;
     renderMainUI();
     showStatus('Restored the values from before the last fill.', false);
@@ -1062,6 +1778,9 @@
     autopilotStep = 0;
     autopilotState = 'running';
     autopilotMessage = '';
+    lastFilledPageSignature = null;
+    samePageFillCount = 0;
+    let advanced = false; // Did the previous iteration observe a real step change?
     
     while (autopilotActive) {
       autopilotStep++;
@@ -1073,13 +1792,30 @@
       
       showAutoPilotStatus(`Filling page ${autopilotStep}...`);
       
-      // 1. Scrape the current page
+      // 1. Scrape the current page and its embedded frames
       try {
-        const scrapeResult = SCRAPER.scrapeFormFields();
-        pageFields = scrapeResult.fields;
-        jdText = scrapeResult.job_description || jdText;
+        await scanPageFields();
       } catch (err) {
         stopAutoPilot(`Scraper error: ${err.message}`, 'failed');
+        return;
+      }
+
+      // Guard: do not re-fill a page the site refuses to advance past
+      const signature = pageSignature();
+      if (signature === lastFilledPageSignature && !advanced) samePageFillCount += 1;
+      else {
+        lastFilledPageSignature = signature;
+        samePageFillCount = 1;
+      }
+      if (samePageFillCount > MAX_SAME_PAGE_FILLS) {
+        const blocking = blockingRequiredFields();
+        const blockingText = blocking.length
+          ? `Still required: ${blocking.slice(0, 5).join(', ')}.`
+          : 'Check the fields the site marked as required.';
+        const message = `Stopped: this page did not advance after ${MAX_SAME_PAGE_FILLS} fill attempts. ${blockingText} Nothing was submitted.`;
+        stopAutoPilot(message, 'failed');
+        renderMainUI();
+        showStatus(message, true);
         return;
       }
       
@@ -1100,12 +1836,12 @@
       const title = document.title;
       const platform = UTILS.detectPlatform(url);
       companyName = UTILS.extractCompany(url, title);
-      roleName = title.split(/ - | at | \\| /i)[0]
-        .replace(/Apply for|Job Application for|Opening for/i, '').trim();
+      roleName = UTILS.extractRole(url, title, document);
       
+      const declared = declaredPageStep();
       const formSchema = {
         url, platform, page_title: title,
-        step: autopilotStep, total_steps: 1,
+        step: declared?.step || autopilotStep, total_steps: declared?.total_steps ?? null,
         fields: pageFields, job_description: jdText,
         opportunity_id: workspace.opportunityId,
         resume_version_id: workspace.selectedResumeVersionId
@@ -1114,6 +1850,7 @@
       try {
         const autofillRes = await UTILS.apiCall('/api/autofill', 'POST', formSchema);
         currentInstructions = autofillRes.instructions || [];
+        aiWarning = autofillRes.ai_error || '';
       } catch (err) {
         stopAutoPilot(`Backend error: ${err.message}`, 'failed');
         return;
@@ -1123,13 +1860,20 @@
       
       // 3. Fill all fields
       const result = await fillCurrentInstructions('autopilot_filled');
+      const optionalFailures = failedFieldLabels(result.failures.filter((failure) => !pageFields.find((field) => field.id === failure.field_id)?.required));
       showAutoPilotStatus(
         `Page ${autopilotStep}: Filled ${result.filled}, skipped ${result.skipped}, failed ${result.failed}`
       );
-      if (result.failed) {
-        stopAutoPilot('Stopped for field recovery. Review the failed fields; nothing was submitted.', 'failed');
+      const blocking = blockingRequiredFields();
+      if (blocking.length) {
+        const message = `Stopped for field recovery. Still required: ${blocking.slice(0, 5).join(', ')}. Nothing was submitted.`;
+        stopAutoPilot(message, 'failed');
         renderMainUI();
+        showStatus(message, true);
         return;
+      }
+      if (optionalFailures.length) {
+        console.warn(`[AutoApply] AutoPilot continuing past optional field failures: ${optionalFailures.join(', ')}`);
       }
       
       // 4. Wait for React/Angular to settle
@@ -1155,27 +1899,11 @@
         return;
       }
       
-      showAutoPilotStatus(`Advancing to page ${autopilotStep + 1}...`);
+      showAutoPilotStatus(`Advancing to page ${autopilotStep + 1}...${optionalFailures.length ? ` Optional fields left for you: ${optionalFailures.join(', ')}.` : ''}`);
       
-      // 7. Wait for DOM change (new form step)
-      await new Promise((resolve) => {
-        let resolved = false;
-        const doResolve = () => {
-          if (resolved) return;
-          resolved = true;
-          if (activeObserver) {
-            activeObserver.disconnect();
-            activeObserver = null;
-          }
-          resolve();
-        };
-
-        if (activeObserver) activeObserver.disconnect();
-        activeObserver = FILLER.detectPageChange(doResolve);
-        
-        // Timeout after 10s in case DOM change isn't detected
-        setTimeout(doResolve, 10000);
-      });
+      // 7. Wait for a real step change (bounded; a slow page is caught by the loop guard above)
+      advanced = await waitForPageChange(AUTOPILOT_PAGE_CHANGE_TIMEOUT_MS);
+      if (!advanced) console.warn('[AutoApply] No page change detected before the AutoPilot timeout.');
       
       if (!autopilotActive) return;
       
@@ -1225,7 +1953,7 @@
     `;
     
     const closeBtn = overlayContainer.querySelector('.autoapply-close-btn');
-    if (closeBtn) closeBtn.addEventListener('click', () => { stopAutoPilot(); removeOverlay(); });
+    if (closeBtn) closeBtn.addEventListener('click', () => { stopAutoPilot(); dismissOverlay(); });
     
     const stopBtn = overlayContainer.querySelector('.autoapply-stop-btn');
     if (stopBtn) stopBtn.addEventListener('click', () => {
@@ -1234,18 +1962,15 @@
     });
     
     const closeFinalBtn = overlayContainer.querySelector('.autoapply-close-final-btn');
-    if (closeFinalBtn) closeFinalBtn.addEventListener('click', removeOverlay);
+    if (closeFinalBtn) closeFinalBtn.addEventListener('click', dismissOverlay);
   }
 
   /** Save a prepared application without claiming it was submitted. */
   function logApplicationToHistory() {
-    saveWorkspacePacket('ready_to_review')
-      .then(() => {
-        showStatus('Saved for review. AutoApply did not submit anything.', false);
-      })
-      .catch(err => {
-        console.error('[AutoApply] Failed to log application:', err);
-      });
+    saveWorkspacePacket('ready_to_review').then((packet) => {
+      if (packet) showStatus('Saved for review. AutoApply did not submit anything.', false);
+      else showStatus('Nothing was submitted, but the workspace record could not be saved.', true);
+    });
   }
 
   /**
@@ -1296,14 +2021,22 @@
       return;
     }
 
+    pageText(true); // The user is acting on the page now; refresh the cached page text.
+
     // 1. Programmatically fill all inputs on the active DOM
     const result = await fillCurrentInstructions(advance ? 'filled_for_next' : 'filled_for_review');
     hasFilledCurrentPage = result.filled > 0;
-    showStatus(`Filled ${result.filled}, skipped ${result.skipped}, failed ${result.failed}`, result.failed > 0);
-    if (result.failed) {
+    const optionalFailures = failedFieldLabels(result.failures.filter((failure) => !pageFields.find((field) => field.id === failure.field_id)?.required));
+    const blocking = blockingRequiredFields();
+    if (blocking.length) {
       renderMainUI();
-      showStatus('Resolve the highlighted field failures before continuing. Nothing was submitted.', true);
+      showStatus(`Still required: ${blocking.join(', ')}. Answer them in this panel, then continue. Nothing was submitted.`, true);
       return;
+    }
+    if (optionalFailures.length) {
+      showStatus(`Filled ${result.filled}. ${optionalFailures.length} optional field${optionalFailures.length === 1 ? '' : 's'} need your attention: ${optionalFailures.join(', ')}.`, false);
+    } else {
+      showStatus(`Filled ${result.filled}, skipped ${result.skipped}, failed ${result.failed}`, false);
     }
 
     if (advance) {
@@ -1316,13 +2049,11 @@
       if (clicked) {
         showStatus('Form filled. Moving to next page...', false);
 
-        // 3. Monitor DOM changes to auto-scan the next steps
-        if (activeObserver) activeObserver.disconnect();
-        activeObserver = FILLER.detectPageChange(() => {
-          activeObserver.disconnect();
-          activeObserver = null;
-          startScanningFlow();
-        });
+        // 3. Wait for a real step change, bounded, then re-scan the next step
+        const advanced = await waitForPageChange(PAGE_CHANGE_TIMEOUT_MS);
+        if (!window.__autoapply_active) return; // The user closed the panel while waiting.
+        if (!advanced) console.warn('[AutoApply] No confirmed page change; refreshing the review for the current page.');
+        startScanningFlow({ force: true });
       } else {
         showStatus('Filled fields, but no Next/Continue button could be detected.', true);
       }
@@ -1364,46 +2095,62 @@
 
 
 
-  // Register listeners for messages from the background script
-  browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.type === 'START_AUTOFILL') {
-      startScanningFlow();
-      sendResponse({ status: 'started' });
-    } else if (message.type === 'GET_STATUS') {
-      sendResponse({ status: window.__autoapply_active ? 'active' : 'idle' });
-    } else if (message.type === 'START_AUTOPILOT') {
-      autopilotState = 'starting';
-      autopilotMessage = '';
-      startScanningFlow()
-        .then(() => runAutoPilot())
-        .catch((err) => stopAutoPilot(`AutoPilot startup failed: ${err.message}`, 'failed'));
-      sendResponse({ status: 'started' });
-    } else if (message.type === 'GET_AUTOPILOT_STATUS') {
-      sendResponse({
-        autopilotActive,
-        autopilotStep,
-        autopilotState,
-        message: autopilotMessage
-      });
-    } else if (message.type === 'PREPARE_APPLICATION') {
-      prepareApplicationSilently(message).then(sendResponse);
-      return true;
+  /**
+   * Register this frame's role. The top frame owns the panel, the chip, the
+   * backend flow, and the keyboard/theme listeners. A child frame registers the
+   * responder and nothing else: no panel, no chip, no scan, no backend call —
+   * a page full of ad frames costs one scrape message each and nothing more.
+   */
+  function startOverlay() {
+    if (!IS_TOP_FRAME) {
+      registerChildResponder();
+      return;
     }
-  });
+    // Register listeners for messages from the background script
+    browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (message.type === 'START_AUTOFILL') {
+        startScanningFlow();
+        sendResponse({ status: 'started' });
+      } else if (message.type === 'GET_STATUS') {
+        sendResponse({ status: window.__autoapply_active ? 'active' : 'idle' });
+      } else if (message.type === 'START_AUTOPILOT') {
+        autopilotState = 'starting';
+        autopilotMessage = '';
+        startScanningFlow()
+          .then((started) => (started ? runAutoPilot() : undefined))
+          .catch((err) => stopAutoPilot(`AutoPilot startup failed: ${err.message}`, 'failed'));
+        sendResponse({ status: 'started' });
+      } else if (message.type === 'GET_AUTOPILOT_STATUS') {
+        sendResponse({
+          autopilotActive,
+          autopilotStep,
+          autopilotState,
+          message: autopilotMessage
+        });
+      } else if (message.type === 'PREPARE_APPLICATION') {
+        prepareApplicationSilently(message).then(sendResponse);
+        return true;
+      }
+    });
 
-  colorScheme.addEventListener('change', () => {
-    if (themePreference !== 'system') return;
-    applyOverlayTheme();
-    if (readyChipHost) { removeReadyChip(); mountReadyChip(); }
-  });
-  browser.storage.onChanged.addListener((changes, area) => {
-    if (area !== 'local' || !changes[THEME_KEY]) return;
-    themePreference = themeChoices.has(changes[THEME_KEY].newValue) ? changes[THEME_KEY].newValue : 'system';
-    applyOverlayTheme();
-    if (readyChipHost) { removeReadyChip(); mountReadyChip(); }
-  });
+    watchFrameReplies();
 
-  initializeTheme();
-  setTimeout(mountReadyChip, 700);
+    colorScheme.addEventListener('change', () => {
+      if (themePreference !== 'system') return;
+      applyOverlayTheme();
+      if (readyChipHost) { removeReadyChip(); ensureReadyChip(); }
+    });
+    browser.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local' || !changes[THEME_KEY]) return;
+      themePreference = themeChoices.has(changes[THEME_KEY].newValue) ? changes[THEME_KEY].newValue : 'system';
+      applyOverlayTheme();
+      if (readyChipHost) { removeReadyChip(); ensureReadyChip(); }
+    });
+
+    initializeTheme();
+    setTimeout(ensureReadyChip, 700);
+  }
+
+  startOverlay();
   console.log('[AutoApply] Review Overlay module loaded successfully.');
 })();

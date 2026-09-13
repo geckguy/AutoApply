@@ -55,4 +55,4 @@ class ApplicationStatusUpdate(BaseModel):
     """Validated application status/notes update."""
 
     status: ApplicationStatus
-    notes: Optional[str] = None
+    notes: Optional[str] = Field(default=None, max_length=20_000)

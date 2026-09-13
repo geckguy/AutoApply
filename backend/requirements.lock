@@ -1,0 +1,60 @@
+# Fully resolved dependency set for the AutoApply backend, captured from the
+# working venv (backend/venv/bin/pip freeze) after installing requirements.txt.
+# requirements.txt lists direct dependencies only; this file additionally pins
+# every transitive package to the exact version the check suite was last
+# verified against. Every entry supports Python 3.11.
+#
+#   python -m pip install -r backend/requirements.lock
+aiofiles==24.1.0
+annotated-types==0.7.0
+anyio==4.13.0
+certifi==2026.5.20
+cffi==2.0.0
+charset-normalizer==3.4.7
+click==8.4.1
+cryptography==48.0.0
+fastapi==0.115.0
+google-ai-generativelanguage==0.6.9
+google-api-core==2.30.3
+google-api-python-client==2.197.0
+google-auth==2.53.0
+google-auth-httplib2==0.4.0
+google-generativeai==0.8.0
+googleapis-common-protos==1.75.0
+grpcio==1.80.0
+grpcio-status==1.71.2
+h11==0.16.0
+httpcore==1.0.9
+httplib2==0.31.2
+httptools==0.8.0
+httpx==0.28.1
+idna==3.17
+lxml==6.1.1
+pdfminer.six==20231228
+pdfplumber==0.11.0
+pillow==12.2.0
+proto-plus==1.28.0
+protobuf==5.29.6
+pyasn1==0.6.3
+pyasn1_modules==0.4.2
+pycparser==3.0
+pydantic==2.9.0
+pydantic_core==2.23.2
+pyparsing==3.3.2
+pypdfium2==5.8.0
+python-docx==1.2.0
+python-dotenv==1.0.1
+python-multipart==0.0.9
+PyYAML==6.0.3
+reportlab==5.0.0
+requests==2.34.2
+starlette==0.38.6
+tqdm==4.67.3
+typing_extensions==4.15.0
+tzdata==2026.2
+uritemplate==4.2.0
+urllib3==2.7.0
+uvicorn==0.30.0
+uvloop==0.22.1
+watchfiles==1.2.0
+websockets==16.0

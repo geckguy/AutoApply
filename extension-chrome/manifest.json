@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "AutoApply",
   "version": "1.0.1",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA5PuMJYkdjTDK+Nk5aeS9bFoIlCgNvBoGxjku9LySk9PWVUdaxd/fMgqBArRyoLo4luJLGGJVVcvoMiqwhPFsyx2sabZaAOS3RB3OSyuWHon5eWCxvnBAxBBAICc8wS8GThU0OSuIrwIlzj4bHeqjaQUrLjphh5EyfJlRUudu+e0xbDOlyNTusfTPF3eq79yEhLoEep2TmeNessd/TTK4quYxOdRvAK5Cm/OMSMWztGiqwvRQSIEGeN+ARbwpV82bmS7eccVVBdoHvtRzEhI1NZrgv/BaxqG/QikTWFuxnhh1pzYzQ4MsFxa+JhVK3KNnS7UQ5QngSUe6+MwCYeTCawIDAQAB",
   "description": "AI-powered job application autofill agent - scrapes forms, maps your profile, fills intelligently.",
   "permissions": [
     "activeTab",
@@ -9,7 +10,8 @@
     "notifications"
   ],
   "host_permissions": [
-    "http://localhost:8000/*"
+    "http://localhost/*",
+    "http://127.0.0.1/*"
   ],
   "action": {
     "default_popup": "popup/popup.html",
@@ -22,7 +24,8 @@
     {
       "matches": ["<all_urls>"],
       "js": ["lib/browser-polyfill.js", "lib/utils.js", "content/scraper.js", "content/filler.js", "content/overlay.js"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ],
   "web_accessible_resources": [

@@ -31,10 +31,19 @@
       </div>
     </section>
 
+    <section class="backend" aria-labelledby="backend-label">
+      <form id="backend-form" class="backend-row">
+        <label id="backend-label" for="backend-base">Backend</label>
+        <input id="backend-base" type="url" spellcheck="false" inputmode="url" autocomplete="off" placeholder="http://127.0.0.1:8000" aria-describedby="backend-note">
+        <button type="submit">Save</button>
+      </form>
+      <p id="backend-note" class="backend-note" role="status">Checking the stored backend address…</p>
+    </section>
+
     <section id="offline-help" class="offline-help" hidden>
       <strong>Start the local service</strong>
-      <code>source backend/venv/bin/activate<br>python -m backend.main</code>
-      <p>Your profile stays local; the extension connects only to port 8000.</p>
+      <code id="offline-command">source backend/venv/bin/activate<br>python -m backend.main</code>
+      <p id="offline-copy">Your profile stays local; the extension only talks to a loopback address.</p>
     </section>
 
     <footer class="launcher-footer">
@@ -43,7 +52,7 @@
     </footer>
   </main>
   <script src="../lib/browser-polyfill.js?v=2"></script>
-  <script src="../lib/utils.js?v=2"></script>
-  <script src="popup.js?v=3"></script>
+  <script src="../lib/utils.js?v=3"></script>
+  <script src="popup.js?v=4"></script>
 </body>
 </html>

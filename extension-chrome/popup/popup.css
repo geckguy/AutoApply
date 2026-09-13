@@ -17,9 +17,9 @@
   font-family: "Avenir Next", Avenir, "Segoe UI", sans-serif;
 }
 * { box-sizing: border-box; }
-body { width: 360px; height: 520px; margin: 0; overflow: hidden; color: var(--ink); background: var(--canvas); font-size: 12px; }
+body { width: 360px; min-height: 520px; max-height: 600px; margin: 0; overflow-y: auto; color: var(--ink); background: var(--canvas); font-size: 12px; }
 button { font: inherit; cursor: pointer; }
-.launcher { height: 100%; display: flex; flex-direction: column; padding: 16px; }
+.launcher { min-height: 520px; display: flex; flex-direction: column; padding: 16px; }
 .launcher-header { display: flex; align-items: center; justify-content: space-between; }
 .brand { display: flex; align-items: center; gap: 10px; }
 .brand-mark { display: block; width: 31px; height: 31px; border-radius: 7px; box-shadow: 4px 4px 0 #d6ddef; transform: rotate(-1deg); }
@@ -65,6 +65,15 @@ button { font: inherit; cursor: pointer; }
 .offline-help strong { display: block; color: #855100; }
 .offline-help code { display: block; margin: 7px 0; padding: 7px; color: #fff; background: var(--navy); border-radius: 5px; font-size: 9px; line-height: 1.5; }
 .offline-help p { margin: 0; color: var(--muted); font-size: 9px; }
+.backend { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.backend-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 7px; }
+.backend-row label { color: var(--muted); font: 800 8px "SFMono-Regular", Consolas, monospace; text-transform: uppercase; letter-spacing: .1em; }
+.backend-row input { min-width: 0; padding: 6px 7px; color: var(--ink); background: var(--paper); border: 1px solid var(--line-strong); border-radius: 5px; font: 700 10px "SFMono-Regular", Consolas, monospace; }
+.backend-row input:focus { border-color: var(--cobalt); }
+.backend-row button { min-height: 28px; padding: 0 10px; color: var(--navy); background: var(--paper); border: 1px solid var(--line-strong); border-radius: 5px; font-weight: 800; }
+.backend-row button:hover { color: var(--cobalt); border-color: var(--cobalt); }
+.backend-note { margin: 6px 0 0; color: var(--muted); font-size: 9px; }
+.backend-note.error { color: var(--rose); }
 .launcher-footer { display: flex; gap: 8px; margin-top: auto; padding-top: 12px; border-top: 1px solid var(--line); }
 .launcher-footer button { flex: 1; min-height: 36px; color: var(--navy); background: var(--paper); border: 1px solid var(--line-strong); border-radius: 6px; font-weight: 750; }
 .launcher-footer button:hover { color: var(--cobalt); border-color: var(--cobalt); }
@@ -84,4 +93,5 @@ button { font: inherit; cursor: pointer; }
 :root[data-theme="dark"] .offline-help{background:#302719;border-color:#715b35}
 :root[data-theme="dark"] .offline-help strong{color:#f2c97f}
 :root[data-theme="dark"] .offline-help code{background:#080d14}
+:root[data-theme="dark"] .backend-row button{color:var(--ink)}
 :root[data-theme="dark"] :focus-visible{outline-color:#9aaeff}

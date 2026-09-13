@@ -6,13 +6,18 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from backend.models.profile import UserProfile
 from backend.models.form_schema import FormSchema, FillResponse, FitScore
 from backend.models.application import Correction, AnswerBankEntry
 from backend.models.requests import CoverLetterRequest, JobDescriptionRequest
 from backend.services.field_mapper import FieldMapper
+from backend.services.llm_client import (
+    LLMResponseError,
+    ProviderBusy,
+    ProviderNotConfigured,
+)
 from backend.services.local_mapper import LocalFieldMapper
 from backend.services.job_analyzer import JobAnalyzer
 from backend.services.answer_generator import AnswerGenerator
@@ -22,6 +27,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["autofill"])
 
 DATA_DIR = Path(__file__).parent.parent / "data"
+
+# Newest answers only: the answer bank is append-only and every autofill scans
+# whatever is loaded here.
+ANSWER_BANK_LIMIT = 200
 
 # Module-level caches for profile and knowledge to avoid redundant disk reads
 _profile_cache = None
@@ -93,7 +102,7 @@ def autofill(form_schema: FormSchema):
     vault_answers = db.list_answer_vault(500) if hasattr(db, "list_answer_vault") else []
     if not isinstance(vault_answers, list):
         vault_answers = []
-    answers = [*vault_answers, *db.get_answers()]
+    answers = [*vault_answers, *db.get_answers(ANSWER_BANK_LIMIT)]
     local = LocalFieldMapper.map_fields(
         form_schema=form_schema,
         profile=profile,
@@ -103,15 +112,24 @@ def autofill(form_schema: FormSchema):
     )
 
     ai_instructions = []
+    ai_error = None
     if local.unresolved:
         unresolved_schema = form_schema.model_copy(update={"fields": local.unresolved})
-        ai_response = FieldMapper.map_fields(
-            form_schema=unresolved_schema,
-            profile=profile,
-            knowledge=knowledge,
-            corrections=corrections,
-        )
-        ai_instructions = ai_response.instructions
+        try:
+            ai_response = FieldMapper.map_fields(
+                form_schema=unresolved_schema,
+                profile=profile,
+                knowledge=knowledge,
+                corrections=corrections,
+            )
+        except (ProviderNotConfigured, ProviderBusy, LLMResponseError) as error:
+            # Local instructions are still returned; the reason travels in
+            # ai_error so the extension can tell the user what to fix.
+            ai_error = str(error)
+            logger.warning("AI mapping unavailable: %s", error)
+        else:
+            ai_instructions = ai_response.instructions
+            ai_error = ai_response.ai_error
 
     by_field = {
         instruction.field_id: instruction
@@ -139,6 +157,7 @@ def autofill(form_schema: FormSchema):
         review_count=review_count,
         ready_count=sum(1 for instruction in ordered if not instruction.review_required),
         skipped_count=skipped_count,
+        ai_error=ai_error,
     )
 
     # Save any generated text answers to the answer bank
@@ -207,10 +226,10 @@ def log_correction(correction: Correction):
 
 
 @router.get("/answer-bank")
-def get_answer_bank():
-    """Get all past generated answers."""
+def get_answer_bank(limit: int = Query(default=100, ge=1, le=500)):
+    """Get the most recent generated answers."""
     db = get_database()
-    return db.get_answers()
+    return db.get_answers(limit)
 
 
 @router.post("/cover-letter")

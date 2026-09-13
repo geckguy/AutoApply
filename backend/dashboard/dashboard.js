@@ -63,34 +63,84 @@ async function optionalRequest(path) {
     return response.json();
 }
 
+function legacyOpportunity(item) {
+    return {
+        id: item.id, company: item.company, role: item.role, url: item.url,
+        platform: item.platform, status: item.status, fit_score: item.fit_score,
+        notes: item.notes, updated_at: item.applied_at, created_at: item.applied_at,
+    };
+}
+
+function legacyOverview(items) {
+    const countIn = (statuses) => items.filter((item) => statuses.has(item.status)).length;
+    return {
+        summary: {
+            ready: countIn(new Set(['saved','preparing','ready_to_review'])),
+            applied: countIn(new Set(['applied','submitted'])),
+            interviews: countIn(new Set(['interview','negotiating'])),
+            offers: countIn(new Set(['offer','accepted'])),
+        },
+        actions: [], reminders: [], upcoming_interviews: [],
+        recent_activity: items.slice(0, 5),
+        resumes: [], policies: [], answers: [],
+    };
+}
+
 async function loadData() {
     $('#workspace-connection').textContent = 'Syncing local workspace…';
     $('#workspace-connection').className = 'connection-state';
+
+    const [profile, knowledge] = await Promise.all([
+        optionalRequest('/api/profile/').catch(() => null),
+        optionalRequest('/api/profile/knowledge').catch(() => null),
+    ]);
+    state.profile = profile;
+    state.knowledge = knowledge?.content || '';
+
+    let workspaceError = null;
+    let usedHistoryFallback = false;
     try {
-        const [opportunities, overview, profile, knowledge] = await Promise.all([
+        const [opportunities, overview] = await Promise.all([
             request('/api/workspace/opportunities?limit=500'),
             request('/api/workspace/overview'),
-            optionalRequest('/api/profile/'),
-            optionalRequest('/api/profile/knowledge'),
         ]);
         state.opportunities = opportunities.opportunities || [];
         state.overview = overview || {};
-        state.profile = profile;
-        state.knowledge = knowledge?.content || '';
-        $('#workspace-connection').textContent = 'Workspace ready';
-        $('#workspace-connection').className = 'connection-state ready';
-        renderAll();
-        const requestedId = new URLSearchParams(location.search).get('application');
-        if (requestedId && state.opportunities.some((item) => item.id === requestedId)) {
-            history.replaceState(null, '', `${location.pathname}#applications`);
-            setActiveView('applications');
-            await openDetail(requestedId);
-        }
     } catch (error) {
+        // WORKSPACE_API.md: the original application-history API stays available
+        // as an always-on fallback, so a missing/broken workspace endpoint
+        // degrades to history instead of blanking every panel.
+        workspaceError = error;
+        const history = await request('/api/applications/?limit=500').catch(() => null);
+        if (history) {
+            usedHistoryFallback = true;
+            state.opportunities = history.map(legacyOpportunity);
+            state.overview = legacyOverview(state.opportunities);
+        } else {
+            state.opportunities = [];
+            state.overview = {};
+        }
+    }
+
+    renderAll();
+    if (usedHistoryFallback) {
+        $('#workspace-connection').textContent = 'History fallback';
+        $('#workspace-connection').className = 'connection-state ready';
+        toast('The workspace API is unavailable; showing your saved application history.', true);
+    } else if (workspaceError) {
         $('#workspace-connection').textContent = 'Backend unavailable';
         $('#workspace-connection').className = 'connection-state';
-        renderAll();
-        toast(`${error.message}. Start the local backend on port 8000.`, true);
+        toast(`${workspaceError.message}. Start the local backend on port 8000.`, true);
+    } else {
+        $('#workspace-connection').textContent = 'Workspace ready';
+        $('#workspace-connection').className = 'connection-state ready';
+    }
+
+    const requestedId = new URLSearchParams(location.search).get('application');
+    if (requestedId && state.opportunities.some((item) => item.id === requestedId)) {
+        history.replaceState(null, '', `${location.pathname}#applications`);
+        setActiveView('applications');
+        await openDetail(requestedId);
     }
 }
 

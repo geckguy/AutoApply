@@ -8,6 +8,7 @@ from pathlib import Path
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +136,7 @@ class Database:
             );
             CREATE TABLE IF NOT EXISTS learned_mappings (
                 id TEXT PRIMARY KEY, field_fingerprint TEXT UNIQUE NOT NULL, field_label TEXT, input_type TEXT,
-                source_path TEXT, value_json TEXT, confidence TEXT, evidence_count INTEGER NOT NULL DEFAULT 1,
+                source_path TEXT, domain TEXT, value_json TEXT, confidence TEXT, evidence_count INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS application_packets (
@@ -172,12 +173,17 @@ class Database:
             """
         )
         self.conn.commit()
+        learned_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(learned_mappings)")}
+        if "domain" not in learned_columns:
+            # Databases created before corrections were scoped to a site.
+            self.conn.execute("ALTER TABLE learned_mappings ADD COLUMN domain TEXT")
+            self.conn.commit()
         self._migrate_json_data()
         self._migrate_workspace_data()
 
     def _migrate_workspace_data(self) -> None:
         """Copy legacy records into additive workspace tables exactly once."""
-        with self._write_lock:
+        with self._write_lock, self.conn:
             now = self._now()
             for app in self.conn.execute("SELECT * FROM applications").fetchall():
                 item = dict(app)
@@ -208,95 +214,108 @@ class Database:
     def _normalize_url(url: str) -> str:
         return url.split("?", 1)[0].split("#", 1)[0].rstrip("/").lower()
 
+    @staticmethod
+    def _hostname(url: str) -> str:
+        """Return the lower-case hostname of a URL or bare host ("" when absent)."""
+        value = str(url or "").strip()
+        if not value:
+            return ""
+        parsed = urlparse(value if "://" in value else f"//{value}")
+        return (parsed.hostname or "").casefold()
+
     def _migrate_json_data(self) -> None:
         """One-time migration of existing JSON files into SQLite."""
-        cur = self.conn.cursor()
+        with self._write_lock, self.conn:
+            cur = self.conn.cursor()
 
-        # --- applications.json ---
-        apps_path = self.data_dir / "applications.json"
-        if apps_path.exists():
-            count = cur.execute("SELECT COUNT(*) FROM applications").fetchone()[0]
-            if count == 0:
-                try:
-                    with open(apps_path, "r") as f:
-                        apps = json.load(f)
-                    for a in apps:
-                        cur.execute(
-                            "INSERT OR IGNORE INTO applications "
-                            "(id, company, role, url, platform, applied_at, "
-                            "fit_score, status, notes, job_description_snippet) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            (
-                                a.get("id"),
-                                a.get("company"),
-                                a.get("role"),
-                                a.get("url"),
-                                a.get("platform"),
-                                a.get("applied_at"),
-                                a.get("fit_score"),
-                                a.get("status", "applied"),
-                                a.get("notes"),
-                                a.get("job_description_snippet"),
-                            ),
-                        )
-                    self.conn.commit()
-                    logger.info("Migrated %d applications from JSON to SQLite", len(apps))
-                except Exception:
-                    logger.exception("Failed to migrate applications.json")
+            # --- applications.json ---
+            apps_path = self.data_dir / "applications.json"
+            if apps_path.exists():
+                count = cur.execute("SELECT COUNT(*) FROM applications").fetchone()[0]
+                if count == 0:
+                    try:
+                        with open(apps_path, "r") as f:
+                            apps = json.load(f)
+                        for a in apps:
+                            cur.execute(
+                                "INSERT OR IGNORE INTO applications "
+                                "(id, company, role, url, platform, applied_at, "
+                                "fit_score, status, notes, job_description_snippet) "
+                                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                (
+                                    a.get("id"),
+                                    a.get("company"),
+                                    a.get("role"),
+                                    a.get("url"),
+                                    a.get("platform"),
+                                    a.get("applied_at"),
+                                    a.get("fit_score"),
+                                    a.get("status", "applied"),
+                                    a.get("notes"),
+                                    a.get("job_description_snippet"),
+                                ),
+                            )
+                        self.conn.commit()
+                        logger.info("Migrated %d applications from JSON to SQLite", len(apps))
+                    except Exception:
+                        self.conn.rollback()
+                        logger.exception("Failed to migrate applications.json")
 
-        # --- corrections.json ---
-        corrections_path = self.data_dir / "corrections.json"
-        if corrections_path.exists():
-            count = cur.execute("SELECT COUNT(*) FROM corrections").fetchone()[0]
-            if count == 0:
-                try:
-                    with open(corrections_path, "r") as f:
-                        corrections = json.load(f)
-                    for c in corrections:
-                        cur.execute(
-                            "INSERT INTO corrections "
-                            "(timestamp, field_label, agent_value, user_value, context, url) "
-                            "VALUES (?, ?, ?, ?, ?, ?)",
-                            (
-                                c.get("timestamp"),
-                                c.get("field_label"),
-                                c.get("agent_value"),
-                                c.get("user_value"),
-                                c.get("context"),
-                                c.get("url"),
-                            ),
-                        )
-                    self.conn.commit()
-                    logger.info("Migrated %d corrections from JSON to SQLite", len(corrections))
-                except Exception:
-                    logger.exception("Failed to migrate corrections.json")
+            # --- corrections.json ---
+            corrections_path = self.data_dir / "corrections.json"
+            if corrections_path.exists():
+                count = cur.execute("SELECT COUNT(*) FROM corrections").fetchone()[0]
+                if count == 0:
+                    try:
+                        with open(corrections_path, "r") as f:
+                            corrections = json.load(f)
+                        for c in corrections:
+                            cur.execute(
+                                "INSERT INTO corrections "
+                                "(timestamp, field_label, agent_value, user_value, context, url) "
+                                "VALUES (?, ?, ?, ?, ?, ?)",
+                                (
+                                    c.get("timestamp"),
+                                    c.get("field_label"),
+                                    c.get("agent_value"),
+                                    c.get("user_value"),
+                                    c.get("context"),
+                                    c.get("url"),
+                                ),
+                            )
+                        self.conn.commit()
+                        logger.info("Migrated %d corrections from JSON to SQLite", len(corrections))
+                    except Exception:
+                        self.conn.rollback()
+                        logger.exception("Failed to migrate corrections.json")
 
-        # --- answer_bank.json ---
-        ab_path = self.data_dir / "answer_bank.json"
-        if ab_path.exists():
-            count = cur.execute("SELECT COUNT(*) FROM answer_bank").fetchone()[0]
-            if count == 0:
-                try:
-                    with open(ab_path, "r") as f:
-                        entries = json.load(f)
-                    for e in entries:
-                        cur.execute(
-                            "INSERT INTO answer_bank "
-                            "(company, role, question_type, question, answer, date) "
-                            "VALUES (?, ?, ?, ?, ?, ?)",
-                            (
-                                e.get("company"),
-                                e.get("role"),
-                                e.get("question_type"),
-                                e.get("question"),
-                                e.get("answer"),
-                                e.get("date"),
-                            ),
-                        )
-                    self.conn.commit()
-                    logger.info("Migrated %d answer bank entries from JSON to SQLite", len(entries))
-                except Exception:
-                    logger.exception("Failed to migrate answer_bank.json")
+            # --- answer_bank.json ---
+            ab_path = self.data_dir / "answer_bank.json"
+            if ab_path.exists():
+                count = cur.execute("SELECT COUNT(*) FROM answer_bank").fetchone()[0]
+                if count == 0:
+                    try:
+                        with open(ab_path, "r") as f:
+                            entries = json.load(f)
+                        for e in entries:
+                            cur.execute(
+                                "INSERT INTO answer_bank "
+                                "(company, role, question_type, question, answer, date) "
+                                "VALUES (?, ?, ?, ?, ?, ?)",
+                                (
+                                    e.get("company"),
+                                    e.get("role"),
+                                    e.get("question_type"),
+                                    e.get("question"),
+                                    e.get("answer"),
+                                    e.get("date"),
+                                ),
+                            )
+                        self.conn.commit()
+                        logger.info("Migrated %d answer bank entries from JSON to SQLite", len(entries))
+                    except Exception:
+                        self.conn.rollback()
+                        logger.exception("Failed to migrate answer_bank.json")
 
     # ------------------------------------------------------------------
     # Applications
@@ -304,7 +323,7 @@ class Database:
 
     def add_application(self, app_dict: dict) -> None:
         """Insert a new application row."""
-        with self._write_lock:
+        with self._write_lock, self.conn:
             self.conn.execute(
                 "INSERT INTO applications "
                 "(id, company, role, url, platform, applied_at, "
@@ -370,7 +389,7 @@ class Database:
         self, app_id: str, status: str, notes: str | None = None
     ) -> bool:
         """Update status (and optionally notes). Returns True if found."""
-        with self._write_lock:
+        with self._write_lock, self.conn:
             if notes is not None:
                 cur = self.conn.execute(
                     "UPDATE applications SET status = ?, notes = ? WHERE id = ?",
@@ -425,7 +444,7 @@ class Database:
 
     def add_correction(self, correction_dict: dict) -> int:
         """Insert a correction and return the total count."""
-        with self._write_lock:
+        with self._write_lock, self.conn:
             self.conn.execute(
                 "INSERT INTO corrections "
                 "(timestamp, field_label, agent_value, user_value, context, url) "
@@ -456,7 +475,7 @@ class Database:
 
     def add_answer(self, answer_dict: dict) -> None:
         """Insert an answer bank entry."""
-        with self._write_lock:
+        with self._write_lock, self.conn:
             self.conn.execute(
                 "INSERT INTO answer_bank "
                 "(company, role, question_type, question, answer, date) "
@@ -472,9 +491,11 @@ class Database:
             )
             self.conn.commit()
 
-    def get_answers(self) -> list[dict]:
-        """Return all answer bank entries."""
-        rows = self.conn.execute("SELECT * FROM answer_bank").fetchall()
+    def get_answers(self, limit: int = 100) -> list[dict]:
+        """Return the most recent answer bank entries."""
+        rows = self.conn.execute(
+            "SELECT * FROM answer_bank ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
         return [dict(row) for row in rows]
 
     def find_similar_answers(self, question: str, limit: int = 5) -> list[dict]:
@@ -515,7 +536,7 @@ class Database:
         }
         columns = list(opportunity)
         assignments = ", ".join(f"{col}=excluded.{col}" for col in columns if col not in {"id", "created_at"})
-        with self._write_lock:
+        with self._write_lock, self.conn:
             self.conn.execute(
                 f"INSERT INTO opportunities ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)}) "
                 f"ON CONFLICT(id) DO UPDATE SET {assignments}",
@@ -628,7 +649,7 @@ class Database:
         if not values:
             return self.get_opportunity(opportunity_id)
         values["updated_at"] = self._now()
-        with self._write_lock:
+        with self._write_lock, self.conn:
             cur = self.conn.execute(
                 f"UPDATE opportunities SET {', '.join(f'{key}=?' for key in values)} WHERE id=?",
                 (*values.values(), opportunity_id),
@@ -663,7 +684,7 @@ class Database:
             # generated it; this also satisfies the schema's content hash guard.
             item["id"] = duplicate["id"]
         artifacts = item.get("artifacts", {})
-        with self._write_lock:
+        with self._write_lock, self.conn:
             if item.get("make_active") or item.get("is_default"):
                 self.conn.execute("UPDATE resume_versions SET is_default=0")
             self.conn.execute(
@@ -685,7 +706,7 @@ class Database:
         return [self._decode_row(row) for row in rows]
 
     def set_resume_default(self, version_id: str, is_default: bool) -> dict | None:
-        with self._write_lock:
+        with self._write_lock, self.conn:
             if is_default:
                 self.conn.execute("UPDATE resume_versions SET is_default=0")
             cur = self.conn.execute("UPDATE resume_versions SET is_default=?, updated_at=? WHERE id=?", (int(is_default), self._now(), version_id))
@@ -695,7 +716,7 @@ class Database:
     def upsert_answer_vault(self, item: dict) -> dict:
         now = self._now()
         key = hashlib.sha256(item["question"].casefold().strip().encode()).hexdigest()
-        with self._write_lock:
+        with self._write_lock, self.conn:
             self.conn.execute(
                 "INSERT INTO answer_vault (id,question_key,question,answer,question_type,company,role,platform,tags_json,source,approved,created_at,updated_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET question=excluded.question,answer=excluded.answer,"
@@ -721,7 +742,7 @@ class Database:
             row = self.conn.execute("SELECT * FROM answer_vault WHERE id=?", (answer_id,)).fetchone()
             return self._decode_row(row)
         values["updated_at"] = self._now()
-        with self._write_lock:
+        with self._write_lock, self.conn:
             cur = self.conn.execute(
                 f"UPDATE answer_vault SET {', '.join(f'{key}=?' for key in values)} WHERE id=?",
                 (*values.values(), answer_id),
@@ -734,7 +755,7 @@ class Database:
         now = self._now()
         policy_id = item.get("id") or item["field_key"]
         action = item.get("action", "ask")
-        with self._write_lock:
+        with self._write_lock, self.conn:
             self.conn.execute(
                 "INSERT INTO field_policies (id,field_key,label,description,action,value_json,confidence,scope_json,enabled,created_at,updated_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(field_key) DO UPDATE SET label=excluded.label,description=excluded.description,"
@@ -753,7 +774,7 @@ class Database:
         return [item for item in self.list_policies() if item.get("enabled")]
 
     def set_policies_enabled(self, policies: list[dict]) -> list[dict]:
-        with self._write_lock:
+        with self._write_lock, self.conn:
             for policy in policies:
                 self.conn.execute(
                     "UPDATE field_policies SET enabled=?, action=COALESCE(?, action), updated_at=? WHERE id=?",
@@ -765,12 +786,13 @@ class Database:
     def upsert_mapping(self, item: dict) -> dict:
         now = self._now()
         identifier = hashlib.sha256(item["field_fingerprint"].encode()).hexdigest()[:32]
-        with self._write_lock:
+        with self._write_lock, self.conn:
             self.conn.execute(
-                "INSERT INTO learned_mappings (id,field_fingerprint,field_label,input_type,source_path,value_json,confidence,evidence_count,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(field_fingerprint) DO UPDATE SET field_label=excluded.field_label,input_type=excluded.input_type,"
-                "source_path=excluded.source_path,value_json=excluded.value_json,confidence=excluded.confidence,evidence_count=learned_mappings.evidence_count + excluded.evidence_count,updated_at=excluded.updated_at",
-                (identifier, item["field_fingerprint"], item.get("field_label"), item.get("input_type"), item.get("source_path"), self._json(item.get("value")),
+                "INSERT INTO learned_mappings (id,field_fingerprint,field_label,input_type,source_path,domain,value_json,confidence,evidence_count,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(field_fingerprint) DO UPDATE SET field_label=excluded.field_label,input_type=excluded.input_type,"
+                "source_path=excluded.source_path,domain=COALESCE(excluded.domain,learned_mappings.domain),value_json=excluded.value_json,confidence=excluded.confidence,evidence_count=learned_mappings.evidence_count + excluded.evidence_count,updated_at=excluded.updated_at",
+                (identifier, item["field_fingerprint"], item.get("field_label"), item.get("input_type"), item.get("source_path"),
+                 item.get("domain"), self._json(item.get("value")),
                  item.get("confidence"), item.get("evidence_increment", 1), now, now),
             )
             self.conn.commit()
@@ -785,12 +807,14 @@ class Database:
         label = item.get("field_label") or item.get("field_key") or "unknown"
         url = item.get("url") or ""
         fingerprint = item.get("field_fingerprint") or f"{self._normalize_url(url)}|{label.casefold().strip()}"
+        domain = item.get("domain") or self._hostname(url)
         return self.upsert_mapping(
             {
                 "field_fingerprint": fingerprint,
                 "field_label": label,
                 "input_type": item.get("input_type"),
                 "source_path": item.get("source_path"),
+                "domain": domain,
                 "value": item.get("value", item.get("user_value")),
                 "confidence": item.get("confidence", "high"),
                 "evidence_increment": item.get("evidence_increment", 1),
@@ -800,7 +824,7 @@ class Database:
     def upsert_packet(self, item: dict) -> dict:
         now = self._now()
         packet_id = item["id"]
-        with self._write_lock:
+        with self._write_lock, self.conn:
             self.conn.execute(
                 "INSERT INTO application_packets "
                 "(id,opportunity_id,resume_version_id,stage,page_url,instructions_json,field_failures_json,cover_letter,tailored_resume,form_snapshot_json,status,created_at,updated_at) "
@@ -859,7 +883,7 @@ class Database:
 
     def add_receipt(self, item: dict) -> dict:
         now = self._now()
-        with self._write_lock:
+        with self._write_lock, self.conn:
             self.conn.execute(
                 "INSERT INTO submission_receipts "
                 "(id,opportunity_id,packet_id,submitted_at,confirmation_code,confirmation_url,screenshot_path,details_json,user_confirmed,created_at) "
@@ -887,7 +911,7 @@ class Database:
 
     def add_contact(self, item: dict) -> dict:
         now = self._now()
-        with self._write_lock:
+        with self._write_lock, self.conn:
             self.conn.execute(
                 "INSERT INTO contacts (id,opportunity_id,name,email,phone,title,relationship,notes,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (item["id"], item["opportunity_id"], item["name"], item.get("email"), item.get("phone"), item.get("title"),
@@ -898,7 +922,7 @@ class Database:
 
     def add_follow_up(self, item: dict) -> dict:
         now = self._now()
-        with self._write_lock:
+        with self._write_lock, self.conn:
             self.conn.execute(
                 "INSERT INTO follow_ups (id,opportunity_id,contact_id,due_at,kind,notes,completed_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
                 (item["id"], item["opportunity_id"], item.get("contact_id"), item["due_at"], item.get("kind", "follow_up"),
@@ -913,7 +937,7 @@ class Database:
         if not values:
             return self._decode_row(self.conn.execute("SELECT * FROM follow_ups WHERE id=?", (follow_up_id,)).fetchone())
         values["updated_at"] = self._now()
-        with self._write_lock:
+        with self._write_lock, self.conn:
             cur = self.conn.execute(
                 f"UPDATE follow_ups SET {', '.join(f'{key}=?' for key in values)} WHERE id=?",
                 (*values.values(), follow_up_id),
@@ -925,7 +949,7 @@ class Database:
 
     def add_interview(self, item: dict) -> dict:
         now = self._now()
-        with self._write_lock:
+        with self._write_lock, self.conn:
             self.conn.execute(
                 "INSERT INTO interviews (id,opportunity_id,scheduled_at,interview_type,timezone,location,interviewer_names_json,notes,outcome,created_at,updated_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?)",

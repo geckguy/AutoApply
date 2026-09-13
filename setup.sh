@@ -25,6 +25,21 @@ else
     echo "Virtual environment exists"
 fi
 
+# The server runs on the venv interpreter, so that is the one that must be 3.11+.
+if [ ! -x "backend/venv/bin/python" ]; then
+    echo "❌ backend/venv has no usable interpreter (backend/venv/bin/python is missing)."
+    echo "   Delete it and run setup again: rm -rf backend/venv && ./setup.sh"
+    exit 1
+fi
+if ! backend/venv/bin/python -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' 2>/dev/null; then
+    VENV_VERSION=$(backend/venv/bin/python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "an unusable interpreter")
+    echo "❌ backend/venv runs Python $VENV_VERSION; AutoApply requires 3.11 or newer."
+    echo "   Delete it and run setup again: rm -rf backend/venv && ./setup.sh"
+    exit 1
+fi
+VENV_VERSION=$(backend/venv/bin/python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+echo "backend/venv uses Python $VENV_VERSION"
+
 # Activate and install dependencies
 echo "📦 Installing dependencies..."
 source backend/venv/bin/activate
@@ -64,5 +79,6 @@ echo "     python -m backend.main"
 echo "  3. Load the extension in Firefox:"
 echo "     → about:debugging#/runtime/this-firefox"
 echo "     → Load Temporary Add-on → select extension/manifest.json"
-echo "  4. Upload your resume in the extension popup"
+echo "  4. Upload your resume in the dashboard:"
+echo "     → http://127.0.0.1:8000/dashboard#profile"
 echo "  5. Navigate to a job application and press Ctrl+Shift+A"

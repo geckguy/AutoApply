@@ -17,6 +17,10 @@ OpportunityStatus = Literal[
     "no_response", "archived",
 ]
 
+FieldPolicyAction = Literal[
+    "fill", "select", "check", "skip", "ask", "always", "fixed", "never", "ask_every_time"
+]
+
 
 class OpportunityUpsert(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
@@ -34,6 +38,10 @@ class OpportunityUpsert(BaseModel):
     resume_version_id: Optional[str] = Field(default=None, max_length=100)
     target_date: Optional[str] = Field(default=None, max_length=64)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # Duplicate handling is resolved client-side before the write; these two
+    # fields steer that decision and are never persisted.
+    duplicate_resolution: Optional[str] = Field(default=None, max_length=100)
+    existing_id: Optional[str] = Field(default=None, max_length=100)
 
 
 class OpportunityPatch(BaseModel):
@@ -80,7 +88,7 @@ class AnswerVaultUpsert(BaseModel):
 
 class FieldPolicyUpsert(BaseModel):
     field_key: str = Field(min_length=1, max_length=500)
-    action: Literal["fill", "select", "check", "skip", "ask", "always", "fixed", "never", "ask_every_time"] = "ask"
+    action: FieldPolicyAction = "ask"
     value: Optional[Any] = None
     confidence: Literal["high", "medium", "low"] = "high"
     scope: dict[str, Any] = Field(default_factory=dict)
@@ -109,11 +117,38 @@ class ApplicationAnswerUpsert(BaseModel):
 
 class ApplicationPacketUpsert(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
+    opportunity_id: str = Field(min_length=1, max_length=100)
+    stage: Optional[str] = Field(default=None, max_length=100)
+    page_url: Optional[str] = Field(default=None, max_length=4096)
+    instructions: list[dict[str, Any]] = Field(default_factory=list, max_length=1000)
+    field_failures: list[dict[str, Any]] = Field(default_factory=list, max_length=1000)
     resume_version_id: Optional[str] = Field(default=None, max_length=100)
     cover_letter: Optional[str] = Field(default=None, max_length=50_000)
     tailored_resume: Optional[str] = Field(default=None, max_length=100_000)
     form_snapshot: dict[str, Any] = Field(default_factory=dict)
     status: str = Field(default="draft", max_length=100)
+
+
+class TeachUpsert(BaseModel):
+    """A user correction captured from the overlay for future autofills."""
+
+    opportunity_id: Optional[str] = Field(default=None, max_length=100)
+    packet_id: Optional[str] = Field(default=None, max_length=100)
+    url: Optional[str] = Field(default=None, max_length=4096)
+    field: dict[str, Any] = Field(min_length=1)
+    proposed_value: Optional[Any] = None
+    corrected_value: Optional[Any] = None
+    failure_reason: Optional[str] = Field(default=None, max_length=2000)
+
+
+class PolicyToggle(BaseModel):
+    id: str = Field(min_length=1, max_length=200)
+    enabled: bool = False
+    action: Optional[FieldPolicyAction] = None
+
+
+class PolicyToggleList(BaseModel):
+    policies: list[PolicyToggle] = Field(default_factory=list, max_length=500)
 
 
 class SubmissionReceiptCreate(BaseModel):

@@ -3,6 +3,7 @@
 import csv
 import io
 import logging
+import sqlite3
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -22,7 +23,7 @@ router = APIRouter(prefix="/api/applications", tags=["applications"])
 
 
 @router.get("/")
-async def list_applications(
+def list_applications(
     limit: int = Query(default=50, ge=1, le=500),
     status: Optional[ApplicationStatus] = Query(default=None),
 ):
@@ -38,13 +39,20 @@ async def list_applications(
 
 
 @router.post("/")
-async def log_application(application: Application):
+def log_application(application: Application):
     """Log a completed job application.
 
     Called by the extension after the user finishes filling a form.
     """
     db = get_database()
-    db.add_application(application.model_dump())
+    try:
+        db.add_application(application.model_dump())
+    except sqlite3.IntegrityError:
+        # The client supplies the id; a retry or double submit is not an error.
+        raise HTTPException(
+            status_code=409,
+            detail="An application with this id already exists",
+        )
 
     logger.info(
         f"Application logged: {application.company} — {application.role} "
@@ -61,7 +69,7 @@ async def log_application(application: Application):
 
 
 @router.get("/check-duplicate", response_model=DuplicateCheckResult)
-async def check_duplicate(
+def check_duplicate(
     url: str = Query(default=""),
     company: str = Query(default=""),
     role: str = Query(default=""),
@@ -100,7 +108,7 @@ async def check_duplicate(
 
 
 @router.put("/{app_id}/status")
-async def update_status(app_id: str, body: ApplicationStatusUpdate):
+def update_status(app_id: str, body: ApplicationStatusUpdate):
     """Update the status of an application.
 
     Args:
@@ -120,7 +128,7 @@ async def update_status(app_id: str, body: ApplicationStatusUpdate):
 
 
 @router.get("/export")
-async def export_applications():
+def export_applications():
     """Export all applications as CSV."""
     db = get_database()
     apps = db.get_applications(limit=10000)

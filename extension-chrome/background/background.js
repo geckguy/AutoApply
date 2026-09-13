@@ -8,14 +8,45 @@ if (typeof browser === 'undefined') {
 }
 
 
-// Track global extension state
-let extensionState = {
-  status: 'idle', // idle, scanning, filling, reviewing, complete
-  lastActiveTabId: null,
-  todayCount: 0
-};
+// MV2 loads lib/utils.js through the manifest; MV3 service workers load it here.
+if (typeof importScripts === 'function') importScripts('../lib/utils.js');
 
+const STATE_STORAGE_KEY = 'extensionState';
 const MAX_RESUME_BYTES = 10 * 1024 * 1024;
+
+// MV3 service workers are evicted after ~30s idle, so the day-stamped counter
+// and the status live in browser.storage.local instead of module scope.
+function normalizeExtensionState(stored) {
+  const state = stored && typeof stored === 'object' ? stored : {};
+  const todayKey = new Date().toDateString();
+  return {
+    status: typeof state.status === 'string' ? state.status : 'idle',
+    lastActiveTabId: Number.isInteger(state.lastActiveTabId) ? state.lastActiveTabId : null,
+    todayKey,
+    todayCount: state.todayKey === todayKey && Number.isInteger(state.todayCount) ? state.todayCount : 0
+  };
+}
+
+async function readExtensionState() {
+  const stored = await browser.storage.local.get(STATE_STORAGE_KEY);
+  return normalizeExtensionState(stored ? stored[STATE_STORAGE_KEY] : null);
+}
+
+// Serialize read-modify-write cycles so concurrent events cannot lose an update.
+let stateWriteChain = Promise.resolve();
+function mutateExtensionState(mutate) {
+  const run = stateWriteChain.then(async () => {
+    const next = await mutate(await readExtensionState());
+    await browser.storage.local.set({ [STATE_STORAGE_KEY]: next });
+    return next;
+  });
+  stateWriteChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+function updateExtensionState(patch) {
+  return mutateExtensionState((state) => ({ ...state, ...patch }));
+}
 
 function bytesToBase64(bytes) {
   const chunkSize = 0x8000;
@@ -40,8 +71,9 @@ async function fetchResumeVersion(versionId) {
   if (typeof versionId !== 'string' || !versionId.trim()) {
     throw new Error('Choose a resume version before attaching it.');
   }
+  const base = await AutoApplyUtils.getApiBase();
   const response = await fetch(
-    `http://localhost:8000/api/workspace/resume-versions/${encodeURIComponent(versionId)}/download`,
+    `${base}/api/workspace/resume-versions/${encodeURIComponent(versionId)}/download`,
     { signal: AbortSignal.timeout(30000) }
   );
   if (!response.ok) throw new Error(`Resume download failed (${response.status}).`);
@@ -59,6 +91,20 @@ async function fetchResumeVersion(versionId) {
   };
 }
 
+async function startAutofillOnActiveTab() {
+  const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+  if (!tabs || !tabs[0]) throw new Error('No active tab found.');
+  await updateExtensionState({ status: 'scanning', lastActiveTabId: tabs[0].id });
+  try {
+    const response = await browser.tabs.sendMessage(tabs[0].id, { type: 'START_AUTOFILL' });
+    await updateExtensionState({ status: 'reviewing' });
+    return response;
+  } catch (error) {
+    await updateExtensionState({ status: 'idle' });
+    throw error;
+  }
+}
+
 function showNotification(title, message) {
   browser.notifications.create({
     type: 'basic',
@@ -73,57 +119,50 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('[AutoApply Background] Received message:', message);
 
   if (message.type === 'APP_LOGGED') {
-    extensionState.todayCount = (extensionState.todayCount || 0) + 1;
-    showNotification(
-      'Application Logged',
-      `Applied to ${message.data.role} at ${message.data.company}. Total today: ${extensionState.todayCount}`
-    );
-    sendResponse({ status: 'success' });
-    return false;
+    mutateExtensionState((state) => ({ ...state, todayCount: state.todayCount + 1 }))
+      .then((state) => {
+        showNotification(
+          'Application Logged',
+          `Applied to ${message.data.role} at ${message.data.company}. Total today: ${state.todayCount}`
+        );
+        sendResponse({ status: 'success' });
+      })
+      .catch((err) => {
+        console.error('[AutoApply Background] Error recording the application:', err);
+        sendResponse({ status: 'error', error: err.message });
+      });
+    return true; // Keep connection open for async sendResponse
   }
 
   if (message.type === 'START_AUTOFILL') {
-    // Query active tab in the current window
-    browser.tabs.query({ active: true, currentWindow: true })
-      .then((tabs) => {
-        if (tabs && tabs[0]) {
-          const tabId = tabs[0].id;
-          extensionState.status = 'scanning';
-          extensionState.lastActiveTabId = tabId;
-          
-          // Send message to the tab's content script
-          return browser.tabs.sendMessage(tabId, { type: 'START_AUTOFILL' });
-        } else {
-          throw new Error('No active tab found.');
-        }
-      })
-      .then((response) => {
-        extensionState.status = 'reviewing';
-        sendResponse({ status: 'success', details: response });
-      })
+    startAutofillOnActiveTab()
+      .then((details) => sendResponse({ status: 'success', details }))
       .catch((err) => {
         console.error('[AutoApply Background] Error starting autofill:', err);
-        extensionState.status = 'idle';
         sendResponse({ status: 'error', error: err.message });
       });
-      
+
     return true; // Keep connection open for async sendResponse
   }
 
   if (message.type === 'GET_STATUS') {
-    sendResponse(extensionState);
-    return false;
+    readExtensionState()
+      .then((state) => sendResponse(state))
+      .catch((err) => sendResponse({ status: 'error', error: err.message }));
+    return true;
   }
 
   if (message.type === 'SET_STATUS') {
-    extensionState.status = message.status;
-    sendResponse({ status: 'updated' });
-    return false;
+    updateExtensionState({ status: message.status })
+      .then(() => sendResponse({ status: 'updated' }))
+      .catch((err) => sendResponse({ status: 'error', error: err.message }));
+    return true;
   }
 
   if (message.type === 'GET_RECENT_APPS') {
     // Route API fetch through background to avoid potential CORS issues in popup contexts
-    fetch('http://localhost:8000/api/applications/?limit=5', { signal: AbortSignal.timeout(30000) })
+    AutoApplyUtils.getApiBase()
+      .then((base) => fetch(`${base}/api/applications/?limit=5`, { signal: AbortSignal.timeout(30000) }))
       .then((res) => {
         if (!res.ok) throw new Error(`HTTP error ${res.status}`);
         return res.json();
@@ -135,7 +174,7 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.error('[AutoApply Background] Error fetching applications:', err);
         sendResponse({ status: 'error', error: err.message });
       });
-      
+
     return true; // Keep connection open
   }
 
@@ -152,36 +191,38 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ status: 'error', error: 'Missing opportunity ID.' });
       return false;
     }
-    const url = `http://localhost:8000/dashboard?application=${encodeURIComponent(opportunityId)}#applications`;
-    browser.tabs.create({ url })
+    AutoApplyUtils.getApiBase()
+      .then((base) => browser.tabs.create({ url: `${base}/dashboard?application=${encodeURIComponent(opportunityId)}#applications` }))
       .then(() => sendResponse({ status: 'success' }))
       .catch((err) => sendResponse({ status: 'error', error: err.message }));
     return true;
   }
 
   if (message.type === 'API_CALL_PROXY') {
-    const url = `http://localhost:8000${message.endpoint}`;
-    const options = {
-      method: message.method,
-      signal: AbortSignal.timeout(30000)
-    };
-    if (message.method !== 'GET') {
-      options.headers = { 'Content-Type': 'application/json' };
-      if (message.body) {
-        options.body = JSON.stringify(message.body);
-      }
-    }
+    (async () => {
+      try {
+        const base = await AutoApplyUtils.getApiBase();
+        const options = {
+          method: message.method,
+          signal: AbortSignal.timeout(30000)
+        };
+        if (message.method !== 'GET') {
+          options.headers = { 'Content-Type': 'application/json' };
+          if (message.body) {
+            options.body = JSON.stringify(message.body);
+          }
+        }
 
-    fetch(url, options)
-      .then(async (res) => {
+        const res = await fetch(`${base}${message.endpoint}`, options);
         if (!res.ok) {
           const text = await res.text();
           throw new Error(`API error ${res.status}: ${text}`);
         }
-        return res.json();
-      })
-      .then((data) => sendResponse({ status: 'success', data }))
-      .catch((err) => sendResponse({ status: 'error', error: err.message }));
+        sendResponse({ status: 'success', data: await res.json() });
+      } catch (err) {
+        sendResponse({ status: 'error', error: err.message });
+      }
+    })();
 
     return true; // Keep connection open
   }
@@ -189,25 +230,11 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Listen for keyboard shortcut commands
 browser.commands.onCommand.addListener((command) => {
-  if (command === 'toggle-autofill') {
-    console.log('[AutoApply Background] Keyboard shortcut triggered: toggle-autofill');
-    browser.tabs.query({ active: true, currentWindow: true })
-      .then((tabs) => {
-        if (tabs && tabs[0]) {
-          const tabId = tabs[0].id;
-          extensionState.status = 'scanning';
-          extensionState.lastActiveTabId = tabId;
-          return browser.tabs.sendMessage(tabId, { type: 'START_AUTOFILL' });
-        }
-      })
-      .then(() => {
-        extensionState.status = 'reviewing';
-      })
-      .catch((err) => {
-        console.error('[AutoApply Background] Keyboard shortcut error:', err);
-        extensionState.status = 'idle';
-      });
-  }
+  if (command !== 'toggle-autofill') return;
+  console.log('[AutoApply Background] Keyboard shortcut triggered: toggle-autofill');
+  startAutofillOnActiveTab().catch((err) => {
+    console.error('[AutoApply Background] Keyboard shortcut error:', err);
+  });
 });
 
 console.log('[AutoApply Background] Service worker loaded.');

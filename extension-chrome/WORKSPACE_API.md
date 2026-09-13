@@ -1,8 +1,10 @@
 # Workspace API contract
 
 The extension treats every endpoint here as optional. A missing workspace
-service must not prevent normal profile autofill. All requests use the existing
-local API base (`http://localhost:8000`) and JSON unless stated otherwise.
+service must not prevent normal profile autofill. All requests use the
+configured local API base — extension storage key `autoapplyApiBase`, default
+`http://127.0.0.1:8000`, editable in the popup's **Backend** field — and JSON
+unless stated otherwise.
 
 ## Opportunity and policy context
 
@@ -94,5 +96,7 @@ opportunity, latest packet, selected resume, prepared answers, fill failures,
 receipt, contacts, follow-ups, and interviews. Follow-ups can be completed or
 rescheduled with `PATCH /api/workspace/follow-ups/{id}`.
 
-The legacy `/api/applications` routes remain available and canonical writes are
-mirrored for installed extension compatibility.
+The legacy `/api/applications` routes remain available: canonical writes are
+mirrored into them, and the dashboard keeps them as an always-on fallback —
+`GET /api/applications/?limit=500` replaces a failed workspace read (shown as
+"History fallback") instead of blanking every panel.

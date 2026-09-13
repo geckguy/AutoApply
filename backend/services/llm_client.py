@@ -7,13 +7,18 @@ Consumer services import `get_llm_client()` and never worry about the provider.
 import json
 import re
 import os
+import time
 import logging
 import threading
+import collections
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 from dotenv import load_dotenv
+
+if TYPE_CHECKING:
+    from backend.models.profile import UserProfile
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +27,69 @@ _backend_dir = Path(__file__).parent.parent
 load_dotenv(_backend_dir / ".env")
 
 DEFAULT_PROVIDER = "gemini"
-SUPPORTED_PROVIDERS = frozenset({"gemini", "openrouter"})
+SUPPORTED_PROVIDERS = frozenset({"gemini", "openrouter", "opencode"})
+
+# Prompt budget shared by every service that interpolates the knowledge file.
+MAX_KNOWLEDGE_CHARS = 4000
+
+# A provider call is never allowed to block a request handler longer than this;
+# callers abort at 30s (extension) and would otherwise wait on a dead response.
+MAX_PROVIDER_WAIT_SECONDS = 20.0
+
+
+class ProviderNotConfigured(ValueError):
+    """The AI provider is selected but required configuration is missing."""
+
+
+class ProviderBusy(RuntimeError):
+    """The AI provider cannot serve the request right now (rate limited)."""
+
+
+class LLMResponseError(RuntimeError):
+    """The provider returned a payload the caller cannot use."""
+
+
+def configured_max_calls_per_minute(default: int) -> int:
+    """Read LLM_MAX_CALLS_PER_MINUTE, falling back to the provider default."""
+    raw = os.getenv("LLM_MAX_CALLS_PER_MINUTE", "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    return default
+
+
+class RateLimiter:
+    """Pace provider calls; raise ProviderBusy instead of blocking past the budget."""
+
+    def __init__(
+        self,
+        max_calls: int = 2,
+        period: float = 60.0,
+        max_wait: float = MAX_PROVIDER_WAIT_SECONDS,
+    ):
+        self.max_calls = max_calls
+        self.period = period
+        self.max_wait = max_wait
+        self.calls: collections.deque = collections.deque()
+        self.lock = threading.Lock()
+
+    def wait_if_needed(self) -> None:
+        while True:
+            with self.lock:
+                now = time.time()
+                while self.calls and now - self.calls[0] > self.period:
+                    self.calls.popleft()
+                if len(self.calls) >= self.max_calls:
+                    sleep_time = self.period - (now - self.calls[0]) + 0.1
+                else:
+                    self.calls.append(now)
+                    return
+            if sleep_time > self.max_wait:
+                raise ProviderBusy(
+                    f"AI provider rate limit reached; retry in {sleep_time:.0f}s."
+                )
+            logger.info(f"Rate limit: waiting {sleep_time:.1f}s...")
+            time.sleep(sleep_time)
+
 
 _PROVIDER_SETTINGS = {
     "gemini": {
@@ -34,6 +101,11 @@ _PROVIDER_SETTINGS = {
         "api_key_env": "OPENROUTER_API_KEY",
         "default_model": None,
         "model_env": "OPENROUTER_MODEL",
+    },
+    "opencode": {
+        "api_key_env": "OPENCODE_API_KEY",
+        "default_model": None,
+        "model_env": "OPENCODE_MODEL",
     },
 }
 
@@ -88,7 +160,7 @@ def inspect_provider_configuration() -> dict[str, str | bool | None]:
             "provider": provider,
             "model": None,
             "configured": False,
-            "error": "Set OPENROUTER_MODEL explicitly in backend/.env.",
+            "error": f"Set {model_env} explicitly in backend/.env.",
         }
 
     if provider == "openrouter":
@@ -118,6 +190,38 @@ def inspect_provider_configuration() -> dict[str, str | bool | None]:
         "configured": True,
         "error": None,
     }
+
+
+# Never serialize these to a provider: the local mapper refuses to fill
+# demographics, so the values must not leave the machine either.
+_PROMPT_EXCLUDED_PROFILE_FIELDS = {
+    "personal": {"date_of_birth", "nationality"},
+    "legal": True,
+}
+
+
+def profile_prompt_json(profile: "UserProfile") -> str:
+    """Serialize a profile for an LLM prompt without its sensitive subset.
+
+    `personal.date_of_birth`, `personal.nationality` and every `legal` value are
+    dropped; callers interpolate the returned JSON verbatim.
+    """
+    return profile.model_dump_json(
+        indent=2,
+        exclude_none=True,
+        exclude=_PROMPT_EXCLUDED_PROFILE_FIELDS,
+    )
+
+
+def provider_status_line() -> str:
+    """One-line AI provider readiness summary for startup logging."""
+    configuration = inspect_provider_configuration()
+    if configuration["configured"]:
+        return f"AI provider ready: {configuration['provider']} ({configuration['model']})"
+    return (
+        f"AI provider unavailable: {configuration['error']} "
+        "AI-assisted features will fail until this is fixed."
+    )
 
 
 class LLMClient(ABC):
@@ -209,6 +313,7 @@ def get_llm_client() -> LLMClient:
     Supported values for AI_PROVIDER:
         - "gemini"     (default) — uses Google Gemini via google-generativeai SDK
         - "openrouter" — uses OpenRouter API (OpenAI-compatible)
+        - "opencode"   — uses the OpenCode Go gateway (OpenAI-compatible)
     """
     global _client
     if _client is None:
@@ -216,17 +321,20 @@ def get_llm_client() -> LLMClient:
             if _client is None:  # double-check
                 configuration = inspect_provider_configuration()
                 if not configuration["configured"]:
-                    raise ValueError(configuration["error"])
+                    raise ProviderNotConfigured(str(configuration["error"]))
 
                 provider = str(configuration["provider"])
                 if provider == "openrouter":
                     from backend.services.openrouter import OpenRouterClient
                     _client = OpenRouterClient()
+                elif provider == "opencode":
+                    from backend.services.opencode import OpenCodeGoClient
+                    _client = OpenCodeGoClient()
                 elif provider == "gemini":
                     from backend.services.gemini import GeminiClient
                     _client = GeminiClient()
                 else:  # Defensive guard: inspect_provider_configuration validates this.
-                    raise ValueError(f"Unsupported AI_PROVIDER '{provider}'.")
+                    raise ProviderNotConfigured(f"Unsupported AI_PROVIDER '{provider}'.")
                 logger.info(
                     f"LLM client initialized: provider={_client.provider_name}, "
                     f"model={_client.model_name}"

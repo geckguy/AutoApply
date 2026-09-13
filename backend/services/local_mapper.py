@@ -27,6 +27,34 @@ _SENSITIVE = {
     "disability_status",
 }
 
+# Profile facts that belong to the applicant alone.  When the label names
+# somebody else (a referrer, an emergency contact, the employer) the
+# applicant's own value must never be filled in.
+_OWNED_CONTACT = {"email", "phone"}
+# Online profiles are applicant-only too: "Company website" or "Referrer
+# LinkedIn" must never receive the applicant's own link.
+_OWNED_URL = {"linkedin", "website"}
+_APPLICANT_OWNED = _OWNED_CONTACT | _OWNED_URL
+_THIRD_PARTY_QUALIFIERS = (
+    "referrer",
+    "reference",
+    "referee",
+    "recruiter",
+    "company",
+    "employer",
+    "emergency",
+    "manager",
+    "supervisor",
+    "hr",
+    "human resources",
+    "other",
+    "spouse",
+    "partner",
+    "relative",
+    "guardian",
+    "parent",
+)
+
 
 @dataclass
 class LocalMapResult:
@@ -58,6 +86,11 @@ def field_text(form_field: FormField) -> str:
     )
 
 
+def _contains_phrase(text: str, phrase: str) -> bool:
+    """Match a normalized phrase on word boundaries inside normalized text."""
+    return re.search(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])", text) is not None
+
+
 def _tokens(value: str) -> set[str]:
     stop = {
         "a", "an", "and", "are", "do", "for", "how", "in", "is", "of",
@@ -79,12 +112,24 @@ def answer_similarity(left: str, right: str) -> float:
     return (overlap * 0.7) + (sequence * 0.3)
 
 
+def _approved(entry: dict[str, Any]) -> bool:
+    """Return True only for an explicit approval flag; a missing flag is unapproved.
+
+    The legacy ``answer_bank`` table has no ``approved`` column, so rows read
+    from it must never be treated as approved for reuse.
+    """
+    approved = entry.get("approved")
+    if isinstance(approved, str):
+        return approved.strip().casefold() in {"1", "true", "yes"}
+    return approved in (1, True)
+
+
 def best_answer(question: str, entries: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
     """Return a sufficiently similar approved vault answer."""
     winner: dict[str, Any] | None = None
     winner_score = 0.0
     for entry in entries:
-        if entry.get("approved") in (0, False, "false"):
+        if not _approved(entry):
             continue
         score = answer_similarity(question, str(entry.get("question") or entry.get("title") or ""))
         if score > winner_score:
@@ -133,12 +178,25 @@ def _profile_values(profile: UserProfile) -> dict[str, tuple[Any, str]]:
     return values
 
 
+# Personal-site wording.  GitHub and GitLab labels resolve to the profile's
+# GitHub URL; every other wording resolves to its portfolio URL.
+_GIT_HOST_ALIASES = ("github", "gitlab")
+_WEBSITE_ALIASES = (
+    "website",
+    "personal website",
+    "personal site",
+    "portfolio",
+    "blog",
+    "homepage",
+    "personal url",
+    *_GIT_HOST_ALIASES,
+)
+
 _ALIASES: list[tuple[str, tuple[str, ...]]] = [
     ("email", ("email", "e mail")),
     ("phone", ("phone", "mobile", "telephone")),
-    ("linkedin", ("linkedin",)),
-    ("github", ("github",)),
-    ("portfolio", ("portfolio", "personal website", "website url")),
+    ("linkedin", ("linkedin", "linked in", "linkedin profile", "linkedin url")),
+    ("website", _WEBSITE_ALIASES),
     ("first_name", ("first name", "given name")),
     ("last_name", ("last name", "surname", "family name")),
     ("full_name", ("full name", "legal name", "your name", "candidate name")),
@@ -168,34 +226,54 @@ _ALIASES: list[tuple[str, tuple[str, ...]]] = [
 
 
 def classify_field(form_field: FormField) -> str | None:
-    """Classify an untrusted page field using conservative phrase matches."""
+    """Classify an untrusted page field using conservative phrase matches.
+
+    Aliases are matched on word boundaries in the table's existing order, so a
+    short alias can no longer win inside a longer label word (``state`` in
+    "statement"/"States", ``city`` in "Ethnicity"/"Capacity").  ``linkedin``
+    and ``website`` stay separate categories so neither wording captures the
+    other's fields.
+    """
     text = field_text(form_field)
     for category, aliases in _ALIASES:
-        if any(alias in text for alias in aliases):
+        if any(_contains_phrase(text, alias) for alias in aliases):
             return category
     return None
 
 
-def _option_value(value: Any, options: list[str]) -> str | None:
+def _website_target(text: str) -> tuple[str, str]:
+    """Return the profile key and the review reason for a personal-site field."""
+    if any(_contains_phrase(text, alias) for alias in _GIT_HOST_ALIASES):
+        return "github", "Add a GitHub URL to your profile"
+    return "portfolio", "Add a portfolio URL to your profile"
+
+
+def _option_match(value: Any, options: list[str]) -> tuple[str | None, bool]:
+    """Return the option to submit and whether it is an exact profile match.
+
+    ``(None, False)`` means the field has options but none of them expresses
+    the profile value, so the field must be escalated or reviewed instead of
+    receiving an invented option.
+    """
     if isinstance(value, bool):
         candidates = ("yes", "true", "authorized", "i agree") if value else ("no", "false", "not authorized")
         for option in options:
             normalized = normalize_question(option)
             if normalized in candidates or any(candidate == normalized for candidate in candidates):
-                return option
-        return "true" if value else "false" if not options else None
+                return option, True
+        return ("true" if value else "false", True) if not options else (None, False)
 
     wanted = normalize_question(str(value))
     if not options:
-        return str(value)
+        return str(value), True
     exact = next((option for option in options if normalize_question(option) == wanted), None)
     if exact:
-        return exact
+        return exact, True
     containing = next(
         (option for option in options if wanted and (wanted in normalize_question(option) or normalize_question(option) in wanted)),
         None,
     )
-    return containing
+    return (containing, False) if containing else (None, False)
 
 
 def _policy_for(category: str | None, text: str, policies: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
@@ -208,18 +286,40 @@ def _policy_for(category: str | None, text: str, policies: Iterable[dict[str, An
     return candidates[-1] if candidates else None
 
 
+def _domain_of(raw: Any) -> str:
+    """Return the lower-case hostname of a URL, a bare host, or a fingerprint prefix."""
+    value = str(raw or "").strip().casefold()
+    if not value:
+        return ""
+    parsed = urlparse(value if "://" in value else f"//{value}")
+    return (parsed.hostname or "").casefold()
+
+
+def _same_site(mapping_domain: str, hostname: str) -> bool:
+    """Return True when a learned mapping's domain covers the page being filled."""
+    return (
+        mapping_domain == hostname
+        or hostname.endswith(f".{mapping_domain}")
+        or mapping_domain.endswith(f".{hostname}")
+    )
+
+
 def _learned_for(text: str, form_schema: FormSchema, mappings: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
-    hostname = (urlparse(form_schema.url).hostname or "").casefold()
+    hostname = _domain_of(form_schema.url)
+    platform = (form_schema.platform or "").casefold()
     for mapping in reversed(list(mappings)):
         mapping_label = normalize_question(str(mapping.get("field_label") or mapping.get("field_key") or ""))
-        mapping_domain = str(mapping.get("domain") or "").casefold()
+        if not mapping_label:
+            continue
+        if not _contains_phrase(text, mapping_label) and answer_similarity(text, mapping_label) < 0.82:
+            continue
+        mapping_domain = _domain_of(mapping.get("domain") or mapping.get("field_fingerprint") or "")
+        if mapping_domain and not _same_site(mapping_domain, hostname):
+            continue
         mapping_platform = str(mapping.get("platform") or "").casefold()
-        if mapping_label and (mapping_label in text or answer_similarity(text, mapping_label) >= 0.82):
-            if mapping_domain and mapping_domain not in hostname:
-                continue
-            if mapping_platform and mapping_platform != (form_schema.platform or "").casefold():
-                continue
-            return mapping
+        if mapping_platform and mapping_platform != platform:
+            continue
+        return mapping
     return None
 
 
@@ -259,6 +359,21 @@ class LocalFieldMapper:
                     field_id=form_field.id, action="skip", confidence="high", source="policy", reason=reason
                 ))
                 continue
+            if category in _APPLICANT_OWNED and any(
+                _contains_phrase(text, qualifier) for qualifier in _THIRD_PARTY_QUALIFIERS
+            ):
+                result.instructions.append(FillInstruction(
+                    field_id=form_field.id,
+                    action="skip",
+                    confidence="high",
+                    source="policy.third_party",
+                    reason=(
+                        "This field asks for someone else's contact details"
+                        if category in _OWNED_CONTACT
+                        else "This field asks about someone else's website or profile"
+                    ),
+                ))
+                continue
 
             fixed_value = (policy or {}).get("fixed_value", (policy or {}).get("value"))
             learned = _learned_for(text, form_schema, learned_mappings)
@@ -279,11 +394,24 @@ class LocalFieldMapper:
                 ))
                 continue
 
-            if value is None and category and category in values:
+            if value is None and category == "website":
+                target, reason = _website_target(text)
+                website_value, website_source = values[target]
+                if website_value in (None, ""):
+                    result.instructions.append(FillInstruction(
+                        field_id=form_field.id,
+                        action="skip",
+                        confidence="high",
+                        source="profile.missing",
+                        reason=reason,
+                    ))
+                    continue
+                value, source = website_value, website_source
+            elif value is None and category and category in values:
                 value, source = values[category]
 
             if value not in (None, ""):
-                option = _option_value(value, form_field.options)
+                option, exact = _option_match(value, form_field.options)
                 if option is None:
                     result.unresolved.append(form_field)
                     continue
@@ -292,11 +420,15 @@ class LocalFieldMapper:
                 if form_field.max_length is not None and len(option) > form_field.max_length:
                     result.unresolved.append(form_field)
                     continue
+                # Only a direct profile fact that matched an option exactly is
+                # safe to present as verified; a fuzzy option match is a guess
+                # and must land in the review queue.
+                confidence = "high" if exact and source and source.startswith("profile") else "medium"
                 result.instructions.append(FillInstruction(
                     field_id=form_field.id,
                     action=action,
                     value=option,
-                    confidence="high" if source and source.startswith("profile") else "medium",
+                    confidence=confidence,
                     source=source,
                 ))
                 continue

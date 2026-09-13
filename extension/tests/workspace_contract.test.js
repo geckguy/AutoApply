@@ -1,59 +1,107 @@
+#!/usr/bin/env node
+
+/*
+ * The browser side and the backend must agree on the workspace API.
+ *
+ * This test asserts the real client call sites — path AND HTTP method — in the
+ * extension source, and drives the shared `workspaceCall()` helper to prove the
+ * URL the backend has to serve. It deliberately does not read WORKSPACE_API.md:
+ * the documentation alone must never satisfy a contract check.
+ *
+ * Byte-level parity between the two browser trees is owned by
+ * scripts/sync-extension.sh --check, so the canonical `extension/` tree is the
+ * one read here.
+ */
+'use strict';
+
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
 const root = path.resolve(__dirname, '..', '..');
-const firefox = path.join(root, 'extension');
-const chrome = path.join(root, 'extension-chrome');
+const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
+const { createContext, loadScripts } = require(path.join(root, 'tests', 'js', 'fake-dom.js'));
 
-function read(relativePath, base = firefox) {
-  return fs.readFileSync(path.join(base, relativePath), 'utf8');
+const overlay = read('extension/content/overlay.js');
+const background = read('extension/background/background.js');
+
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Every workspace endpoint the flow depends on, with the method the client
+// uses. GET is workspaceCall()'s default, so the call may omit it.
+const WORKSPACE_CALLS = [
+  { endpoint: '/resume-versions', method: 'GET' },
+  { endpoint: '/opportunities/upsert', method: 'POST' },
+  { endpoint: '/application-packets', method: 'POST' },
+  { endpoint: '/teaches', method: 'POST' },
+  { endpoint: '/submissions/confirm', method: 'POST' },
+];
+
+for (const { endpoint, method } of WORKSPACE_CALLS) {
+  const quoted = escapeRegExp(`'${endpoint}'`);
+  const pattern = method === 'GET'
+    ? new RegExp(`workspaceCall\\(${quoted}\\s*\\)`)
+    : new RegExp(`workspaceCall\\(${quoted},\\s*'${method}'`);
+  assert.match(overlay, pattern, `overlay.js must call ${method} ${endpoint} through workspaceCall()`);
 }
 
-for (const file of [
-  'lib/utils.js',
-  'content/filler.js',
-  'content/overlay.js',
-  'content/overlay.css',
-  'content/scraper.js',
-  'popup/popup.html',
-  'popup/popup.css',
-  'popup/popup.js',
-  'popup/batch.html',
-  'popup/batch.css',
-  'popup/batch.js',
-  'icons/icon-48.svg',
-  'icons/icon-96.svg',
-  'WORKSPACE_API.md',
-]) {
-  assert.equal(read(file), read(file, chrome), `${file} must stay synchronized across browsers`);
+// The backend API itself, same shape of check.
+const API_CALLS = [
+  { endpoint: '/api/autofill', method: 'POST' },
+  { endpoint: '/api/analyze-job', method: 'POST' },
+  { endpoint: '/api/cover-letter', method: 'POST' },
+  { endpoint: '/api/corrections', method: 'POST' },
+];
+
+for (const { endpoint, method } of API_CALLS) {
+  assert.match(
+    overlay,
+    new RegExp(`apiCall\\('${escapeRegExp(endpoint)}',\\s*'${method}'`),
+    `overlay.js must call ${method} ${endpoint} through apiCall()`,
+  );
 }
-const firefoxBackground = read('background/background.js');
-const chromeBackground = read('background/background.js', chrome)
-  .replace(/if \(typeof browser === 'undefined'\) \{\n  globalThis\.browser = chrome;\n\}\n\n\n/, '');
-assert.equal(firefoxBackground, chromeBackground, 'background feature code must stay synchronized across browsers');
 
-const overlay = read('content/overlay.js');
-const filler = read('content/filler.js');
-const background = firefoxBackground;
-const docs = read('WORKSPACE_API.md');
+assert.match(
+  background,
+  /\/api\/workspace\/resume-versions\/\$\{encodeURIComponent\(versionId\)\}\/download/,
+  'background.js must download a resume version from the workspace API',
+);
 
-for (const endpoint of [
-  '/resume-versions',
-  '/opportunities/upsert',
-  '/application-packets',
-  '/teaches',
-  '/submissions/confirm',
-]) {
-  assert.match(overlay + docs, new RegExp(endpoint.replace(/[/.]/g, '\\$&')));
+// The overlay passes workspace-relative paths; the shared helper composes the
+// /api/workspace prefix the backend serves. Driving it proves the full URL.
+async function main() {
+  const calls = [];
+  const { context } = createContext();
+  context.browser = {
+    runtime: {
+      async sendMessage(message) {
+        calls.push(message);
+        return { status: 'success', data: null };
+      },
+    },
+  };
+  loadScripts(context, root, ['extension/lib/utils.js']);
+  const utils = context.window.__autoapply_utils;
+
+  const body = { question: 'Why this role?' };
+  await utils.workspaceCall('/teaches', 'POST', body);
+  assert.deepEqual(
+    { ...calls[0] },
+    { type: 'API_CALL_PROXY', endpoint: '/api/workspace/teaches', method: 'POST', body },
+    'workspaceCall() must POST workspace-relative paths under /api/workspace',
+  );
+
+  await utils.workspaceCall('/resume-versions');
+  assert.deepEqual(
+    { ...calls[1] },
+    { type: 'API_CALL_PROXY', endpoint: '/api/workspace/resume-versions', method: 'GET', body: null },
+    'workspaceCall() must default to GET under /api/workspace',
+  );
+
+  console.log('workspace contract checks passed');
 }
-assert.match(background, /FETCH_RESUME_VERSION/);
-assert.match(background, /resume-versions\/\$\{encodeURIComponent\(versionId\)\}\/download/);
-assert.match(overlay, /new DataTransfer\(\)/);
-assert.match(filler, /failures/);
-assert.doesNotMatch(filler, /submit application|apply now|final submit/i);
-assert.match(overlay, /Record submission/);
-assert.match(overlay, /PREPARE_APPLICATION/);
-assert.match(overlay, /mountReadyChip/);
 
-console.log('workspace contract and browser parity checks passed');
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

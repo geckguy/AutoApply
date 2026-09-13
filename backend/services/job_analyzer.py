@@ -6,7 +6,7 @@ from typing import Optional
 
 from backend.models.profile import UserProfile
 from backend.models.form_schema import FitScore
-from backend.services.llm_client import get_llm_client
+from backend.services.llm_client import MAX_KNOWLEDGE_CHARS, get_llm_client, profile_prompt_json
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +33,7 @@ class JobAnalyzer:
         Returns:
             FitScore with detailed analysis.
         """
-        client = get_llm_client()
-
-        profile_json = profile.model_dump_json(indent=2, exclude_none=True)
+        profile_json = profile_prompt_json(profile)
 
         system_instruction = (
             "You are an expert job market analyst and career advisor. "
@@ -49,7 +47,7 @@ CANDIDATE PROFILE:
 {profile_json}
 
 ADDITIONAL KNOWLEDGE ABOUT THE CANDIDATE:
-{knowledge if knowledge else "(none provided)"}
+{knowledge[:MAX_KNOWLEDGE_CHARS] if knowledge else "(none provided)"}
 
 JOB DESCRIPTION:
 {job_description[:4000]}
@@ -77,6 +75,7 @@ against what the candidate actually has.
 Return ONLY the JSON object."""
 
         try:
+            client = get_llm_client()
             result = client.generate_json(prompt, system_instruction)
             fit_score = FitScore.model_validate(result)
             logger.info(

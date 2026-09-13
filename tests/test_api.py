@@ -10,7 +10,7 @@ from backend.main import app
 
 class ApiSecurityTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.client = TestClient(app)
+        self.client = TestClient(app, base_url="http://127.0.0.1:8000")
 
     def test_untrusted_web_origin_is_not_allowed_by_cors(self) -> None:
         response = self.client.options(
@@ -36,16 +36,79 @@ class ApiSecurityTests(unittest.TestCase):
         response = self.client.options(
             "/api/profile/",
             headers={
-                "Origin": "chrome-extension://abcdefghijklmnop",
+                "Origin": "chrome-extension://geiaehlmjhdjaglkijniajpkcicebahm",
                 "Access-Control-Request-Method": "GET",
             },
         )
 
         self.assertEqual(200, response.status_code)
         self.assertEqual(
-            "chrome-extension://abcdefghijklmnop",
+            "chrome-extension://geiaehlmjhdjaglkijniajpkcicebahm",
             response.headers["access-control-allow-origin"],
         )
+
+    def test_public_host_header_is_rejected(self) -> None:
+        response = self.client.post(
+            "/api/analyze-job",
+            json={"job_description": ""},
+            headers={"Host": "evil.test"},
+        )
+
+        self.assertEqual(403, response.status_code, response.text)
+
+    def test_loopback_host_header_is_accepted_on_any_port(self) -> None:
+        response = self.client.post(
+            "/api/analyze-job",
+            json={"job_description": ""},
+            headers={"Host": "127.0.0.1:9123"},
+        )
+
+        # The Host check passed; the empty body is what fails next.
+        self.assertEqual(422, response.status_code, response.text)
+
+    def test_dashboard_on_a_non_default_port_is_accepted(self) -> None:
+        # Browsers send Origin on same-origin non-GET requests; a dashboard
+        # served from a non-default port must not have its own writes rejected.
+        client = TestClient(app, base_url="http://127.0.0.1:8123")
+
+        response = client.post(
+            "/api/analyze-job",
+            json={"job_description": ""},
+            headers={"Origin": "http://127.0.0.1:8123"},
+        )
+
+        self.assertEqual(422, response.status_code, response.text)
+
+    def test_loopback_origin_on_a_different_port_is_rejected(self) -> None:
+        response = self.client.post(
+            "/api/analyze-job",
+            json={"job_description": ""},
+            headers={"Origin": "http://127.0.0.1:8123"},
+        )
+
+        self.assertEqual(403, response.status_code, response.text)
+
+    def test_pinned_extension_origins_are_accepted(self) -> None:
+        for origin in (
+            "chrome-extension://geiaehlmjhdjaglkijniajpkcicebahm",
+            "moz-extension://autoapply@local",
+        ):
+            with self.subTest(origin=origin):
+                response = self.client.post(
+                    "/api/analyze-job",
+                    json={"job_description": ""},
+                    headers={"Origin": origin},
+                )
+                self.assertEqual(422, response.status_code, response.text)
+
+    def test_unpinned_extension_origin_is_rejected(self) -> None:
+        response = self.client.post(
+            "/api/analyze-job",
+            json={"job_description": ""},
+            headers={"Origin": "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        )
+
+        self.assertEqual(403, response.status_code, response.text)
 
     def test_job_analysis_body_is_validated_before_work_starts(self) -> None:
         response = self.client.post("/api/analyze-job", json={"job_description": ""})

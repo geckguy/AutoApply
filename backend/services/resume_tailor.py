@@ -1,7 +1,13 @@
 """Resume tailoring service - generates a JD-optimized resume summary."""
 import logging
 from backend.models.profile import UserProfile
-from backend.services.llm_client import get_llm_client
+from backend.services.llm_client import (
+    LLMResponseError,
+    ProviderBusy,
+    ProviderNotConfigured,
+    get_llm_client,
+    profile_prompt_json,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -11,7 +17,7 @@ class ResumeTailor:
         job_description: str,
         profile: UserProfile,
         knowledge: str = "",
-    ) -> dict:
+    ) -> dict | None:
         """Generate a tailored resume summary optimized for the JD.
         
         Returns dict with:
@@ -19,9 +25,10 @@ class ResumeTailor:
             - highlighted_skills: list[str] (skills to emphasize)
             - experience_bullets: list[dict] (tailored bullet points per role)
             - suggestions: list[str] (what to add/change)
+
+        Returns None when the model did not return a JSON object.
         """
-        client = get_llm_client()
-        profile_json = profile.model_dump_json(indent=2, exclude_none=True)
+        profile_json = profile_prompt_json(profile)
         
         system_instruction = (
             "You are a resume optimization expert. You tailor resumes to match job descriptions. "
@@ -52,4 +59,19 @@ Return JSON with this structure:
     "suggestions": ["Add X certification", "Mention Y project", ...]
 }}"""
         
-        return client.generate_json(prompt, system_instruction=system_instruction)
+        try:
+            client = get_llm_client()
+            result = client.generate_json(prompt, system_instruction=system_instruction)
+        except (ProviderNotConfigured, ProviderBusy, LLMResponseError):
+            # Typed provider state; the API layer maps it to an actionable status.
+            raise
+        except Exception as error:
+            raise LLMResponseError(f"Resume tailoring failed: {error}") from error
+
+        if not isinstance(result, dict):
+            logger.warning(
+                "Tailoring provider returned %s instead of a JSON object",
+                type(result).__name__,
+            )
+            return None
+        return result

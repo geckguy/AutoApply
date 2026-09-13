@@ -19,6 +19,7 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 from xml.sax.saxutils import escape
 
 from backend.models.profile import UserProfile
+from backend.services.llm_client import LLMResponseError
 
 
 def _safe_name(value: str) -> str:
@@ -33,8 +34,17 @@ def _lines(value: str | None) -> list[str]:
     return [part.strip(" -\t") for part in parts if part.strip(" -\t")]
 
 
-def apply_tailoring(profile: UserProfile, tailoring: dict[str, Any]) -> UserProfile:
-    """Apply AI reordering/rephrasing to a copy while preserving profile facts."""
+def apply_tailoring(
+    profile: UserProfile, tailoring: dict[str, Any] | None
+) -> UserProfile:
+    """Apply AI reordering/rephrasing to a copy while preserving profile facts.
+
+    Raises LLMResponseError when the provider did not return a tailoring object,
+    so the caller reports a failed tailoring instead of storing an untailored
+    resume version as a success.
+    """
+    if not isinstance(tailoring, dict):
+        raise LLMResponseError("Tailoring provider returned an invalid document")
     result = profile.model_copy(deep=True)
     summary = tailoring.get("summary")
     if isinstance(summary, str) and summary.strip():

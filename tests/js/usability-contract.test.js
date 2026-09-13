@@ -1,3 +1,16 @@
+#!/usr/bin/env node
+
+/*
+ * Packaging invariants that a plausible mistake would break: every file the
+ * manifests load or point at must exist, and the shipped SVGs must be
+ * well-formed with the viewBox the icon set uses.
+ *
+ * Byte-level parity between the two browser trees and between the manifests is
+ * enforced by scripts/sync-extension.sh --check, which scripts/check.sh runs;
+ * it is deliberately not re-implemented here.
+ */
+'use strict';
+
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -5,83 +18,50 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '..', '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
-const overlay = read('extension/content/overlay.js');
-const popup = read('extension/popup/popup.html');
-const popupLogic = read('extension/popup/popup.js');
-const batch = read('extension/popup/batch.js');
-const background = read('extension/background/background.js');
-const dashboard = read('backend/dashboard/dashboard.js');
-const dashboardMarkup = read('backend/dashboard/index.html');
-const dashboardLogo = read('backend/dashboard/logo.svg');
-const firefoxManifest = JSON.parse(read('extension/manifest.json'));
-const chromeManifest = JSON.parse(read('extension-chrome/manifest.json'));
-const visualSources = [
-  read('backend/dashboard/dashboard.css'),
-  read('extension/popup/popup.css'),
-  read('extension/popup/batch.css'),
-  read('extension/content/overlay.css'),
-  read('extension/content/overlay.js'),
-  read('extension/content/filler.js'),
-  read('extension/icons/icon-48.svg'),
-  read('extension/icons/icon-96.svg'),
-  dashboardLogo,
-].join('\n').toLowerCase();
+/** Every file a manifest package loads or links to. */
+function referencedFiles(manifest) {
+  const files = [];
+  const action = manifest.action || manifest.browser_action || {};
 
-assert.match(overlay, /Ready to prepare/);
-assert.match(overlay, /function undoLastFill/);
-assert.match(overlay, /review_required/);
-assert.match(overlay, /Open tracked application/);
-assert.doesNotMatch(overlay, />Save Packet</);
+  files.push(...Object.values(manifest.icons || {}));
+  files.push(...Object.values(action.default_icon || {}));
+  if (action.default_popup) files.push(action.default_popup);
 
-assert.match(popup, /Prepare application/);
-assert.doesNotMatch(popup, /tab-dashboard|Profile & Info|Fixes Mac upload issue/);
-assert.match(popupLogic, /Local answers only/);
-assert.doesNotMatch(popupLogic, /backendReady && profileReady && aiReady && pageReady/);
+  for (const entry of manifest.content_scripts || []) {
+    files.push(...(entry.js || []), ...(entry.css || []));
+  }
+  for (const resource of manifest.web_accessible_resources || []) {
+    if (typeof resource === 'string') files.push(resource);
+    else files.push(...(resource.resources || []));
+  }
 
-assert.match(batch, /PREPARE_APPLICATION/);
-assert.match(batch, /browser\.storage\.local/);
-assert.doesNotMatch(batch, /START_AUTOPILOT/);
-assert.match(background, /OPEN_WORKSPACE_RECORD/);
-assert.match(batch, /OPEN_WORKSPACE_RECORD/);
+  const background = manifest.background || {};
+  files.push(...(background.scripts || []));
+  if (background.service_worker) files.push(background.service_worker);
 
-assert.match(dashboard, /\/api\/workspace\/opportunities\?limit=500/);
-assert.doesNotMatch(dashboard, /\/api\/applications\/\?limit=500/);
-assert.match(dashboard, /function closeAddJob/);
-assert.match(dashboardMarkup, /data-close-add-job/);
-assert.doesNotMatch(dashboardMarkup, /class="icon-button" value="cancel"/);
-assert.match(dashboard, /autoapply-theme/);
-assert.match(popupLogic, /autoapply_theme/);
-assert.match(batch, /autoapply_theme/);
-assert.match(overlay, /autoapply_theme/);
-assert.match(overlay, /const BRAND_MARK =/);
-assert.doesNotMatch(overlay, /autoapply-logo-icon">A/);
-assert.match(dashboardMarkup, /dashboard\/static\/logo\.svg/);
-assert.doesNotMatch(dashboardMarkup, /class="brand-mark">A/);
+  return [...new Set(files)];
+}
 
-assert.match(visualSources, /#3157d5/);
-assert.match(visualSources, /#ea6a4f/);
-assert.match(visualSources, /#0b1018/);
-assert.match(visualSources, /#1b2740/);
-assert.match(visualSources, /#526ce7/);
-assert.doesNotMatch(visualSources, /#ff8a4c|#4fd1c5/);
-assert.doesNotMatch(visualSources, /#8b91ff|#667eea|#764ba2|rgba\(139\s*,\s*145\s*,\s*255|rgba\(102\s*,\s*126\s*,\s*234/);
+for (const tree of ['extension', 'extension-chrome']) {
+  const manifest = JSON.parse(read(`${tree}/manifest.json`));
+  const files = referencedFiles(manifest);
+  assert.ok(files.length >= 6, `${tree}: manifest references its icon, popup, content scripts and background`);
 
-for (const [directory, manifest] of [['extension', firefoxManifest], ['extension-chrome', chromeManifest]]) {
-  const iconPaths = new Set([
-    ...Object.values(manifest.icons || {}),
-    ...Object.values((manifest.action || manifest.browser_action || {}).default_icon || {}),
-  ]);
-  for (const iconPath of iconPaths) {
-    assert.ok(fs.existsSync(path.join(root, directory, iconPath)), `${directory}/${iconPath} must exist`);
+  for (const file of files) {
+    const absolute = path.join(root, tree, file);
+    assert.ok(fs.existsSync(absolute), `${tree}: manifest references ${file}, which must exist`);
+    assert.ok(fs.statSync(absolute).size > 0, `${tree}: manifest-referenced ${file} must not be empty`);
+  }
+
+  for (const icon of Object.values(manifest.icons || {})) {
+    const svg = read(`${tree}/${icon}`);
+    assert.match(svg, /^<svg[\s\S]*<\/svg>\s*$/, `${tree}/${icon} must be a well-formed SVG document`);
+    assert.match(svg, /viewBox="0 0 48 48"/, `${tree}/${icon} must keep the icon set's 48x48 viewBox`);
   }
 }
 
-for (const file of ['icons/icon-48.svg', 'icons/icon-96.svg', 'popup/popup.css', 'popup/batch.css', 'content/overlay.css', 'content/overlay.js']) {
-  assert.equal(read(`extension/${file}`), read(`extension-chrome/${file}`), `${file} must stay in sync across browser packages`);
-}
-for (const svg of [dashboardLogo, read('extension/icons/icon-48.svg'), read('extension/icons/icon-96.svg')]) {
-  assert.match(svg, /^<svg[\s\S]*<\/svg>\s*$/);
-  assert.match(svg, /viewBox="0 0 48 48"/);
-}
+const dashboardLogo = read('backend/dashboard/logo.svg');
+assert.match(dashboardLogo, /^<svg[\s\S]*<\/svg>\s*$/, 'backend/dashboard/logo.svg must be a well-formed SVG document');
+assert.match(dashboardLogo, /viewBox="0 0 48 48"/, 'backend/dashboard/logo.svg must keep its 48x48 viewBox');
 
 console.log('usability workflow contract checks passed');

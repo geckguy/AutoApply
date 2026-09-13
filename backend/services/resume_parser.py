@@ -11,6 +11,11 @@ from backend.services.llm_client import get_llm_client
 
 logger = logging.getLogger(__name__)
 
+# Prompt budget for the structuring call: anything larger is rejected by the
+# provider with an opaque 400, so refuse it locally with an actionable message.
+_MAX_PAGES = 30
+_MAX_TEXT_CHARS = 60_000
+
 
 class ResumeParser:
     """Parses PDF resumes into structured profile data."""
@@ -18,6 +23,10 @@ class ResumeParser:
     @staticmethod
     def extract_text(pdf_path: str) -> str:
         """Extract all text content from a PDF file.
+
+        Raises ValueError when the document exceeds the parser's page or
+        character budget, so the caller can explain the limit instead of
+        forwarding an oversized prompt to the provider.
 
         Args:
             pdf_path: Path to the PDF file.
@@ -27,6 +36,12 @@ class ResumeParser:
         """
         text_parts = []
         with pdfplumber.open(pdf_path) as pdf:
+            page_count = len(pdf.pages)
+            if page_count > _MAX_PAGES:
+                raise ValueError(
+                    f"This PDF has {page_count} pages; resumes are limited to "
+                    f"{_MAX_PAGES} pages."
+                )
             for i, page in enumerate(pdf.pages):
                 page_text = page.extract_text()
                 if page_text:
@@ -34,6 +49,11 @@ class ResumeParser:
                     logger.debug(f"Extracted {len(page_text)} chars from page {i + 1}")
 
         full_text = "\n\n".join(text_parts)
+        if len(full_text) > _MAX_TEXT_CHARS:
+            raise ValueError(
+                f"Extracted {len(full_text)} characters of text; resumes are limited "
+                f"to {_MAX_TEXT_CHARS} characters. Upload a shorter resume."
+            )
         logger.info(
             f"Extracted {len(full_text)} total characters from {len(text_parts)} pages"
         )

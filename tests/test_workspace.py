@@ -14,7 +14,7 @@ class WorkspaceTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.data_dir = Path(self.temp.name)
         self.database = Database(self.data_dir / "workspace.db")
-        self.client = TestClient(app)
+        self.client = TestClient(app, base_url="http://127.0.0.1:8000")
         self.db_patch = patch("backend.routers.workspace.get_database", return_value=self.database)
         self.data_patch = patch("backend.routers.workspace.DATA_DIR", self.data_dir)
         self.version_dir_patch = patch("backend.routers.workspace.RESUME_VERSION_DIR", self.data_dir / "resume_versions")
@@ -187,6 +187,50 @@ class WorkspaceTests(unittest.TestCase):
                 for item in overview["actions"]
             )
         )
+
+    def test_policy_toggle_entries_are_validated(self):
+        for payload in ({"policies": [{}]}, {"policies": [None]}):
+            with self.subTest(payload=payload):
+                response = self.client.put("/api/workspace/policies", json=payload)
+                self.assertEqual(422, response.status_code, response.text)
+
+    def test_opportunity_metadata_must_be_an_object(self):
+        response = self.client.post(
+            "/api/workspace/opportunities/upsert",
+            json={"company": "Example", "role": "Engineer", "metadata": "not-a-dict"},
+        )
+
+        self.assertEqual(422, response.status_code, response.text)
+
+    def test_unknown_application_id_is_rejected_before_writing(self):
+        requests = [
+            ("follow-ups", {"due_at": "2026-07-30T10:00:00Z"}),
+            ("interviews", {"scheduled_at": "2026-07-30T10:00:00Z"}),
+            ("relationships", {"name": "Grace Hopper"}),
+        ]
+        for path, payload in requests:
+            with self.subTest(path=path):
+                response = self.client.post(f"/api/workspace/applications/missing-id/{path}", json=payload)
+                self.assertEqual(404, response.status_code, response.text)
+
+        related = self.database.related_records("missing-id")
+        self.assertEqual([], related["contacts"])
+        self.assertEqual([], related["follow_ups"])
+        self.assertEqual([], related["interviews"])
+
+    def test_oversized_application_packet_is_rejected(self):
+        app_id = self._opportunity()["id"]
+        payload = {"opportunity_id": app_id}
+
+        accepted = self.client.post(
+            "/api/workspace/application-packets", json={**payload, "cover_letter": "x" * 50_000}
+        )
+        self.assertEqual(200, accepted.status_code, accepted.text)
+
+        rejected = self.client.post(
+            "/api/workspace/application-packets", json={**payload, "cover_letter": "x" * 50_001}
+        )
+        self.assertEqual(422, rejected.status_code, rejected.text)
 
     def test_resume_alias_and_private_download(self):
         resume = self.data_dir / "generated.pdf"

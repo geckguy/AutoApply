@@ -94,7 +94,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (action.dataset.batchRetry) return prepareItem(item);
   });
   $('#clear-complete').addEventListener('click', async () => { batch.items = batch.items.filter((item) => !['ready','reused','skipped'].includes(item.status)); await persist(); render(); });
-  $('#open-workspace').addEventListener('click', () => browser.tabs.create({ url:`${UTILS.API_BASE}/dashboard#applications` }));
+  $('#open-workspace').addEventListener('click', async () => browser.tabs.create({ url:`${await UTILS.getApiBase()}/dashboard#applications` }));
   $('#theme-select').addEventListener('change', async (event) => {
     themePreference = themeChoices.has(event.currentTarget.value) ? event.currentTarget.value : 'system';
     applyTheme();

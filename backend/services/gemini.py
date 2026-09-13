@@ -8,14 +8,18 @@ import time
 import logging
 from pathlib import Path
 from typing import Optional
-import collections
-import threading
 
 import google.generativeai as genai
 from dotenv import load_dotenv
 import os
 
-from backend.services.llm_client import LLMClient
+from backend.services.llm_client import (
+    LLMClient,
+    LLMResponseError,
+    ProviderBusy,
+    RateLimiter,
+    configured_max_calls_per_minute,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,29 +27,19 @@ logger = logging.getLogger(__name__)
 _backend_dir = Path(__file__).parent.parent
 load_dotenv(_backend_dir / ".env")
 
-class RateLimiter:
-    def __init__(self, max_calls=2, period=60.0):
-        self.max_calls = max_calls
-        self.period = period
-        self.calls = collections.deque()
-        self.lock = threading.Lock()
+# Retry only on transient conditions; a 4xx rejection will not heal with a retry.
+_RETRYABLE_STATUSES = frozenset({408, 409, 429})
 
-    def wait_if_needed(self):
-        while True:
-            with self.lock:
-                now = time.time()
-                while self.calls and now - self.calls[0] > self.period:
-                    self.calls.popleft()
-                if len(self.calls) >= self.max_calls:
-                    sleep_time = self.period - (now - self.calls[0]) + 0.1
-                else:
-                    self.calls.append(now)
-                    return
-            logger.info(f"Rate limit: waiting {sleep_time:.1f}s...")
-            time.sleep(sleep_time)
+# Global rate limiter instance: 2 calls per 60 seconds unless overridden.
+_rate_limiter = RateLimiter(
+    max_calls=configured_max_calls_per_minute(2), period=60.0
+)
 
-# Global rate limiter instance: max 2 calls per 60 seconds
-_rate_limiter = RateLimiter(max_calls=2, period=60.0)
+
+def _http_status(error: Exception) -> Optional[int]:
+    """Best-effort HTTP status from a google-api-core exception."""
+    code = getattr(error, "code", None)
+    return code if isinstance(code, int) else None
 
 
 class GeminiClient(LLMClient):
@@ -96,6 +90,9 @@ class GeminiClient(LLMClient):
                 if not response.candidates:
                     raise ValueError("Gemini returned no candidates (possibly blocked by safety filters)")
                 return response.text
+            except ProviderBusy:
+                # Waiting longer would exceed the caller's budget; answer immediately.
+                raise
             except Exception as e:
                 last_error = e
                 error_str = str(e)
@@ -105,7 +102,17 @@ class GeminiClient(LLMClient):
                     error_str,
                     re.IGNORECASE,
                 ):
-                    raise RuntimeError("Gemini rejected the configured API key.") from e
+                    raise LLMResponseError("Gemini rejected the configured API key.") from e
+
+                status = _http_status(e)
+                if (
+                    status is not None
+                    and 400 <= status < 500
+                    and status not in _RETRYABLE_STATUSES
+                ):
+                    raise LLMResponseError(
+                        f"Gemini rejected the request (HTTP {status}). {error_str[:200]}"
+                    ) from e
 
                 if attempt == max_retries - 1:
                     break
@@ -124,6 +131,6 @@ class GeminiClient(LLMClient):
                 )
                 time.sleep(wait_time)
 
-        raise RuntimeError(
+        raise LLMResponseError(
             f"Gemini API failed after {max_retries} attempts. Last error: {last_error}"
         )

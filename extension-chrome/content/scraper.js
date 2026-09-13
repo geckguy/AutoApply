@@ -23,10 +23,35 @@ const AutoApplyScraper = (() => {
     const elements = document.querySelectorAll(selectors.join(', '));
 
     elements.forEach((el) => {
-      // Skip hidden/invisible elements
-      const style = getComputedStyle(el);
-      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return;
       if (el.closest('.autoapply-overlay')) return; // Skip our own overlay
+
+      // A descendant of a hidden container keeps its own computed display, so
+      // visibility is judged with the shared box-based predicate: it is empty
+      // when any ancestor is hidden, which is how a multi-step form hides the
+      // steps the user has not reached yet.
+      if (el.type === 'file') {
+        // A styled upload widget hides the native input itself, and that input
+        // is the only thing the resume can be attached to, so it is still
+        // scraped — unless the container around it is not rendered either.
+        if (insideHiddenContainer(el)) return;
+      } else if (!AutoApplyFiller.isRenderedControl(el)) {
+        return;
+      }
+
+      // One field per radio group. Radios in a group are a single question with
+      // the same options, and per-member fields let the backend emit one check
+      // instruction per member — the filler can only honour one of them.
+      if (el.type === 'radio' && el.name) {
+        const group = extractRadioGroup(el);
+        if (group) {
+          if (seen.has(group.id)) return;
+          seen.add(group.id);
+          fields.push(group);
+          return;
+        }
+        // A lone radio, or a group this scraper cannot describe, still gets
+        // the per-element treatment below.
+      }
 
       const fieldData = extractFieldData(el);
       if (!fieldData) return;
@@ -61,7 +86,7 @@ const AutoApplyScraper = (() => {
       el.setAttribute('data-autoapply-id', fieldId);
     }
 
-    const label = findLabel(el);
+    const label = AutoApplyFiller.findLabel(el);
     const type = getFieldType(el);
     if (isSensitiveNonApplicationField(el, label, type)) return null;
 
@@ -87,16 +112,16 @@ const AutoApplyScraper = (() => {
         .map((opt) => opt.textContent.trim());
     }
 
-    // Handle radio/checkbox groups
+    // Radios and checkboxes: options come from the whole group so the backend
+    // can normalise the requested value to the page's own option text. Grouped
+    // radios are consumed by extractRadioGroup() before they reach this
+    // function; this branch covers lone radios and every checkbox.
     if (type === 'radio' || type === 'checkbox') {
       field.group_name = el.name;
-      // Collect all options in the group
       if (el.name) {
-        const group = document.getElementsByName(el.name);
-        field.options = Array.from(group).map((input) => {
-          const groupLabel = findLabel(input);
-          return groupLabel || input.value;
-        });
+        field.options = Array.from(document.getElementsByName(el.name))
+          .map((input) => optionText(input))
+          .filter(Boolean);
       }
     }
 
@@ -147,85 +172,132 @@ const AutoApplyScraper = (() => {
   }
 
   /**
-   * Find the label text for a form element using multiple strategies.
-   * @param {HTMLElement} el
-   * @returns {string|null} Label text
+   * Extract one field for an entire radio group.
+   *
+   * Radios in a group are one question with one set of options — the shape the
+   * backend models (`FormField.type == "radio"` with `options`). Emitting one
+   * field per member makes the backend produce one check instruction per
+   * member, and radio inputs are mutually exclusive, so only the last of those
+   * instructions survives.
+   *
+   * @param {HTMLElement} el - The first rendered member of the group
+   * @returns {Object|null} Field data for the whole group
    */
-  function findLabel(el) {
-    // Strategy 1: Explicit <label for="...">
-    if (el.id) {
-      const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-      if (label) return cleanLabelText(label.textContent);
-    }
+  function extractRadioGroup(el) {
+    const members = Array.from(document.getElementsByName(el.name))
+      .filter((input) => (input.type || '').toLowerCase() === 'radio');
+    if (members.length < 2) return null;
 
-    // Strategy 2: aria-labelledby
-    const labelledBy = el.getAttribute('aria-labelledby');
-    if (labelledBy) {
-      const labelEl = document.getElementById(labelledBy);
-      if (labelEl) return cleanLabelText(labelEl.textContent);
-    }
+    const label = radioGroupLabel(members, el);
+    if (isSensitiveNonApplicationField(el, label, 'radio')) return null;
 
-    // Strategy 3: aria-label
-    const ariaLabel = el.getAttribute('aria-label');
-    if (ariaLabel) return cleanLabelText(ariaLabel);
+    const options = [];
+    members.forEach((member) => {
+      const option = optionText(member);
+      if (option && !options.includes(option)) options.push(option);
+    });
+    if (!options.length) return null;
 
-    // Strategy 4: Wrapping <label> parent
-    const parentLabel = el.closest('label');
-    if (parentLabel) {
-      // Get text that isn't from the input itself
-      const clone = parentLabel.cloneNode(true);
-      const inputs = clone.querySelectorAll('input, select, textarea');
-      inputs.forEach((i) => i.remove());
-      const text = cleanLabelText(clone.textContent);
-      if (text) return text;
-    }
+    let groupId = members
+      .map((member) => member.getAttribute('data-autoapply-id'))
+      .find(Boolean);
+    if (!groupId) groupId = AutoApplyUtils.generateId('radiogroup');
+    // Every member shares the group id so the filler can resolve the group.
+    members.forEach((member) => member.setAttribute('data-autoapply-id', groupId));
 
-    // Strategy 5: Previous sibling label
-    let prev = el.previousElementSibling;
-    while (prev) {
-      if (prev.tagName === 'LABEL' || prev.classList.contains('label')) {
-        return cleanLabelText(prev.textContent);
-      }
-      prev = prev.previousElementSibling;
-    }
+    const checked = members.find((member) => member.checked) || null;
 
-    // Strategy 6: Parent's previous sibling or child heading
-    const parent = el.parentElement;
-    if (parent) {
-      // Look for a label-like element in the parent
-      const labelLike = parent.querySelector(
-        'label, .label, .field-label, .form-label, [class*="label"]'
-      );
-      if (labelLike && !labelLike.contains(el)) {
-        return cleanLabelText(labelLike.textContent);
-      }
-
-      // Look at parent's parent for label
-      const grandParent = parent.parentElement;
-      if (grandParent) {
-        const gpLabel = grandParent.querySelector(
-          'label, .label, .field-label, .form-label, [class*="label"]'
-        );
-        if (gpLabel && !gpLabel.contains(el)) {
-          return cleanLabelText(gpLabel.textContent);
-        }
-      }
-    }
-
-    // Strategy 7: Placeholder or name as fallback
-    if (el.placeholder) return cleanLabelText(el.placeholder);
-    if (el.name) return cleanLabelText(el.name.replace(/[_-]/g, ' '));
-
-    return null;
+    return {
+      id: groupId,
+      type: 'radio',
+      label: label,
+      name: el.name,
+      placeholder: null,
+      required: members.some((member) => member.required || member.getAttribute('aria-required') === 'true'),
+      value: checked ? optionText(checked) : '',
+      options: options,
+      accept: null,
+      max_length: null,
+      aria_label: null,
+      group_name: el.name,
+    };
   }
 
   /**
-   * Clean up label text (trim, remove asterisks, collapse whitespace).
-   * @param {string} text
-   * @returns {string} Cleaned text
+   * True when the container around an element is not rendered either.
+   * Keeps the file-input exemption (ext-6) from scraping an upload widget that
+   * belongs to a later, hidden step: `display:none` above the element empties
+   * every descendant's box list, and a `display:contents` wrapper is climbed
+   * through because it never generates a box of its own.
+   * @param {HTMLElement} el
+   * @returns {boolean}
    */
-  function cleanLabelText(text) {
-    return text
+  function insideHiddenContainer(el) {
+    let node = el.parentElement;
+    while (node && node !== document.body && node !== document.documentElement) {
+      if (typeof node.getClientRects !== 'function' || node.getClientRects().length > 0) return false;
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden') return true;
+      node = node.parentElement;
+    }
+    return false;
+  }
+
+  /** Option text for one radio/checkbox member: its label, else its value. */
+  function optionText(member) {
+    return AutoApplyFiller.findLabel(member) || member.value || '';
+  }
+
+  /**
+   * The question a radio group answers. Each member's own label is its option
+   * ("Yes"), so a fieldset legend or a group-level label is preferred.
+   * @param {Array<HTMLElement>} members
+   * @param {HTMLElement} el - The member being scraped
+   * @returns {string|null}
+   */
+  function radioGroupLabel(members, el) {
+    const container = el.closest('fieldset, [role="radiogroup"], [role="group"]');
+    if (container) {
+      const legend = container.querySelector('legend');
+      if (legend) {
+        const text = cleanGroupLabel(legend.textContent);
+        if (text) return text;
+      }
+      const labelledBy = container.getAttribute('aria-labelledby');
+      if (labelledBy) {
+        const labelEl = document.getElementById(labelledBy);
+        if (labelEl) {
+          const text = cleanGroupLabel(labelEl.textContent);
+          if (text) return text;
+        }
+      }
+      const ariaLabel = container.getAttribute('aria-label');
+      if (ariaLabel) {
+        const text = cleanGroupLabel(ariaLabel);
+        if (text) return text;
+      }
+    }
+
+    // Climb the ancestors looking for a label that describes the group rather
+    // than one of its members.
+    let ancestor = el.parentElement;
+    for (let depth = 0; ancestor && depth < 3; depth++, ancestor = ancestor.parentElement) {
+      const candidates = ancestor.querySelectorAll('label, .label, .field-label, .form-label, [class*="label"]');
+      for (const candidate of candidates) {
+        if (members.some((member) => candidate.contains(member))) continue;
+        const text = cleanGroupLabel(candidate.textContent);
+        if (text) return text;
+      }
+    }
+
+    const memberLabel = AutoApplyFiller.findLabel(members[0]);
+    if (memberLabel) return memberLabel;
+    return el.name ? cleanGroupLabel(el.name.replace(/[_-]/g, ' ')) : null;
+  }
+
+  /** Collapse a group label into the same shape findLabel() produces. */
+  function cleanGroupLabel(text) {
+    return String(text)
       .replace(/\*/g, '')
       .replace(/\s+/g, ' ')
       .trim();

@@ -7,15 +7,19 @@ standard chat-completions format (system + user messages).
 import os
 import time
 import logging
-import collections
-import threading
 from pathlib import Path
 from typing import Optional
 
 import httpx
 from dotenv import load_dotenv
 
-from backend.services.llm_client import LLMClient
+from backend.services.llm_client import (
+    LLMClient,
+    LLMResponseError,
+    ProviderBusy,
+    RateLimiter,
+    configured_max_calls_per_minute,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,58 +28,95 @@ _backend_dir = Path(__file__).parent.parent
 load_dotenv(_backend_dir / ".env")
 
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-class _OpenRouterRateLimiter:
-    """Simple token-bucket rate limiter for OpenRouter free tier."""
 
-    def __init__(self, max_calls: int = 5, period: float = 60.0):
-        self.max_calls = max_calls
-        self.period = period
-        self.calls: collections.deque = collections.deque()
-        self.lock = threading.Lock()
+# One attempt must finish inside the caller's own timeout budget.
+REQUEST_TIMEOUT_SECONDS = 30.0
 
-    def wait_if_needed(self):
-        while True:
-            with self.lock:
-                now = time.time()
-                while self.calls and now - self.calls[0] > self.period:
-                    self.calls.popleft()
-                if len(self.calls) >= self.max_calls:
-                    sleep_time = self.period - (now - self.calls[0]) + 0.1
-                else:
-                    self.calls.append(now)
-                    return
-            logger.info(f"OpenRouter rate limit: waiting {sleep_time:.1f}s...")
-            time.sleep(sleep_time)
+# Retry only on rate limiting and transient server errors.
+_RETRYABLE_STATUSES = frozenset({429})
+
+# Global rate limiter: 5 calls per 60 seconds unless overridden.
+_rate_limiter = RateLimiter(
+    max_calls=configured_max_calls_per_minute(5), period=60.0
+)
 
 
-_rate_limiter = _OpenRouterRateLimiter(max_calls=5, period=60.0)
+def _error_detail(response) -> str:
+    """Best-effort extraction of the gateway's own error message."""
+    if response is None:
+        return ""
+    try:
+        body = response.json()
+    except Exception:
+        try:
+            return (response.text or "").strip()[:300]
+        except Exception:
+            return ""
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict):
+            return str(error.get("message") or error.get("type") or "").strip()[:300]
+        if error:
+            return str(error)[:300]
+        if body.get("message"):
+            return str(body["message"])[:300]
+    return ""
 
 
 class OpenRouterClient(LLMClient):
-    """OpenRouter API client with retry logic, compatible with the LLMClient interface."""
+    """Chat-completions client for an OpenAI-compatible gateway.
+
+    OpenRouter is the built-in configuration; subclasses change `label`, `api_url`,
+    the environment variables and the rate limiter to target another gateway
+    (`OpenCodeGoClient` does exactly that) without duplicating the retry,
+    timeout and error-translation logic below.
+    """
+
+    label = "OpenRouter"
+    provider_key = "openrouter"
+    api_url = OPENROUTER_API_URL
+    api_key_env = "OPENROUTER_API_KEY"
+    model_env = "OPENROUTER_MODEL"
+    base_url_env: Optional[str] = None
+    privacy_mode_supported = True
+    rate_limiter = _rate_limiter
+    request_headers = {
+        "HTTP-Referer": "https://github.com/geckguy/AutoApply",
+        "X-Title": "AutoApply",
+    }
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
+        base_url: Optional[str] = None,
     ):
-        self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
+        self.api_key = api_key or os.getenv(self.api_key_env)
         if not self.api_key:
             raise ValueError(
-                "OPENROUTER_API_KEY not found. Set it in backend/.env or pass it directly."
+                f"{self.api_key_env} not found. Set it in backend/.env or pass it directly."
             )
-        self._model = model or os.getenv("OPENROUTER_MODEL")
+        self._model = model or os.getenv(self.model_env)
         if not self._model:
-            raise ValueError("OPENROUTER_MODEL must be set explicitly in backend/.env.")
-        self._privacy_mode = os.getenv("OPENROUTER_PRIVACY_MODE", "strict").strip().lower()
-        self._http = httpx.Client(timeout=120.0)
-        logger.info(f"OpenRouter client initialized with model: {self._model}")
+            raise ValueError(f"{self.model_env} must be set explicitly in backend/.env.")
+        self._endpoint = (
+            base_url
+            or (os.getenv(self.base_url_env) if self.base_url_env else None)
+            or self.api_url
+        ).strip()
+        self._privacy_mode = (
+            os.getenv("OPENROUTER_PRIVACY_MODE", "strict").strip().lower()
+            if self.privacy_mode_supported
+            else "allow"
+        )
+        self._http = httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS)
+        logger.info(f"{self.label} client initialized with model: {self._model}")
 
     # -- LLMClient interface --------------------------------------------------
 
     @property
     def provider_name(self) -> str:
-        return "openrouter"
+        return self.provider_key
 
     @property
     def model_name(self) -> str:
@@ -90,7 +131,7 @@ class OpenRouterClient(LLMClient):
         system_instruction: Optional[str] = None,
         max_retries: int = 3,
     ) -> str:
-        """Generate text via OpenRouter chat completions API."""
+        """Generate text via the gateway's chat completions endpoint."""
         messages = []
         if system_instruction:
             messages.append({"role": "system", "content": system_instruction})
@@ -99,8 +140,7 @@ class OpenRouterClient(LLMClient):
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/geckguy/AutoApply",
-            "X-Title": "AutoApply",
+            **self.request_headers,
         }
 
         payload = {
@@ -113,31 +153,34 @@ class OpenRouterClient(LLMClient):
         last_error = None
         for attempt in range(max_retries):
             try:
-                _rate_limiter.wait_if_needed()
+                self.rate_limiter.wait_if_needed()
 
                 response = self._http.post(
-                    OPENROUTER_API_URL,
+                    self._endpoint,
                     headers=headers,
                     json=payload,
                 )
                 response.raise_for_status()
                 data = response.json()
 
-                # Handle OpenRouter error responses embedded in 200 OK
+                # Some gateways report failures inside a 200 OK body.
                 if "error" in data:
                     error_msg = data["error"].get("message", str(data["error"]))
-                    raise RuntimeError(f"OpenRouter API error: {error_msg}")
+                    raise RuntimeError(f"{self.label} API error: {error_msg}")
 
                 choices = data.get("choices", [])
                 if not choices:
-                    raise ValueError("OpenRouter returned no choices in response")
+                    raise ValueError(f"{self.label} returned no choices in response")
 
                 content = choices[0].get("message", {}).get("content", "")
                 if not content:
-                    raise ValueError("OpenRouter returned empty content")
+                    raise ValueError(f"{self.label} returned empty content")
 
                 return content
 
+            except ProviderBusy:
+                # Waiting longer would exceed the caller's budget; answer immediately.
+                raise
             except Exception as e:
                 last_error = e
                 error_str = str(e)
@@ -147,11 +190,11 @@ class OpenRouterClient(LLMClient):
                 if (
                     isinstance(status_code, int)
                     and 400 <= status_code < 500
-                    and status_code not in {408, 409, 429}
+                    and status_code not in _RETRYABLE_STATUSES
                 ):
-                    raise RuntimeError(
-                        f"OpenRouter rejected the request (HTTP {status_code}). "
-                        "Check the API key and model configuration."
+                    raise LLMResponseError(
+                        f"{self.label} rejected the request (HTTP {status_code}). "
+                        f"{_error_detail(response) or 'Check the API key, model, and prompt size.'}"
                     ) from e
 
                 if attempt == max_retries - 1:
@@ -170,11 +213,11 @@ class OpenRouterClient(LLMClient):
                             pass
 
                 logger.warning(
-                    f"OpenRouter API attempt {attempt + 1}/{max_retries} failed. "
+                    f"{self.label} attempt {attempt + 1}/{max_retries} failed. "
                     f"Retrying in {wait_time:.1f}s... Error: {error_str[:150]}"
                 )
                 time.sleep(wait_time)
 
-        raise RuntimeError(
-            f"OpenRouter API failed after {max_retries} attempts. Last error: {last_error}"
+        raise LLMResponseError(
+            f"{self.label} request failed after {max_retries} attempts. Last error: {last_error}"
         )

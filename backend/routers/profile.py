@@ -12,6 +12,12 @@ from starlette.concurrency import run_in_threadpool
 
 from backend.models.profile import UserProfile
 from backend.models.requests import KnowledgeUpdate
+from backend.services.llm_client import (
+    LLMResponseError,
+    ProviderBusy,
+    ProviderNotConfigured,
+    inspect_provider_configuration,
+)
 from backend.services.resume_parser import ResumeParser
 
 logger = logging.getLogger(__name__)
@@ -87,6 +93,15 @@ async def upload_resume(file: UploadFile = File(...)):
     if not content.startswith(b"%PDF-"):
         raise HTTPException(status_code=400, detail="Uploaded file is not a valid PDF")
 
+    # Parsing needs the AI provider. Check before the upload is processed so a
+    # misconfiguration reports itself instead of looking like a broken PDF.
+    provider = inspect_provider_configuration()
+    if not provider["configured"]:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Resume parsing needs an AI provider. {provider['error']}",
+        )
+
     temp_fd, temp_name = tempfile.mkstemp(
         dir=DATA_DIR,
         prefix="resume-",
@@ -110,7 +125,7 @@ async def upload_resume(file: UploadFile = File(...)):
         if existing:
             profile = _merge_profiles(existing, profile)
 
-        _save_profile(profile)
+        await run_in_threadpool(_save_profile, profile)
         os.replace(temp_path, resume_path)
         os.chmod(resume_path, PRIVATE_FILE_MODE)
         logger.info("Resume parsed and promoted (%d bytes)", len(content))
@@ -121,7 +136,13 @@ async def upload_resume(file: UploadFile = File(...)):
             "profile": profile.model_dump(exclude_none=True),
         }
 
-    except Exception as e:
+    except (ProviderNotConfigured, ProviderBusy, LLMResponseError):
+        # Provider problems have their own HTTP mapping; do not blame the PDF.
+        raise
+    except ValueError as error:
+        logger.warning("Resume rejected: %s", error)
+        raise HTTPException(status_code=400, detail=str(error))
+    except Exception:
         logger.exception("Resume parsing failed")
         raise HTTPException(
             status_code=500,
@@ -135,7 +156,7 @@ async def upload_resume(file: UploadFile = File(...)):
 
 
 @router.post("/upload-knowledge")
-async def upload_knowledge(body: KnowledgeUpdate):
+def upload_knowledge(body: KnowledgeUpdate):
     """Upload or update the knowledge.md file.
 
     This is a freeform markdown file with additional information about the user
@@ -155,7 +176,7 @@ async def upload_knowledge(body: KnowledgeUpdate):
 
 
 @router.get("/")
-async def get_profile():
+def get_profile():
     """Get the current user profile."""
     profile = _load_profile()
     if not profile:
@@ -167,7 +188,7 @@ async def get_profile():
 
 
 @router.put("/")
-async def update_profile(updates: dict = Body(...)):
+def update_profile(updates: dict = Body(...)):
     """Update specific fields in the profile.
 
     Accepts a partial profile JSON and merges it with the existing profile.
@@ -197,7 +218,7 @@ async def update_profile(updates: dict = Body(...)):
 
 
 @router.get("/knowledge")
-async def get_knowledge():
+def get_knowledge():
     """Get the current knowledge file content."""
     knowledge_path = DATA_DIR / "knowledge.md"
     if not knowledge_path.exists():

@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi import HTTPException
 from starlette.datastructures import UploadFile
@@ -18,8 +19,21 @@ class ProfileHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.original_data_dir = profile_router.DATA_DIR
         self.original_parse_resume = profile_router.ResumeParser.parse_resume
         profile_router.DATA_DIR = self.data_dir
+        # Uploads refuse to start without a configured AI provider; these tests
+        # exercise parsing and file handling, so make the provider available.
+        self.provider_patch = patch(
+            "backend.routers.profile.inspect_provider_configuration",
+            return_value={
+                "provider": "gemini",
+                "model": "test-model",
+                "configured": True,
+                "error": None,
+            },
+        )
+        self.provider_patch.start()
 
     def tearDown(self):
+        self.provider_patch.stop()
         profile_router.DATA_DIR = self.original_data_dir
         profile_router.ResumeParser.parse_resume = staticmethod(self.original_parse_resume)
         self.temp_dir.cleanup()
@@ -76,7 +90,8 @@ class ProfileHardeningTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException) as error:
             await profile_router.upload_resume(uploaded)
 
-        self.assertEqual(error.exception.status_code, 500)
+        # A parser-reported ValueError is a rejected upload, not a server fault.
+        self.assertEqual(error.exception.status_code, 400)
         self.assertEqual(resume_path.read_bytes(), b"%PDF-old")
         self.assertEqual(list(self.data_dir.glob("resume-*.pdf")), [])
 

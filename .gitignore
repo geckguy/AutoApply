@@ -15,13 +15,12 @@ env/
 .env
 *.env.local
 
-# Data files (user-specific)
-backend/data/profile.json
-backend/data/resume.pdf
-backend/data/knowledge.md
-backend/data/applications.json
-backend/data/corrections.json
-backend/data/answer_bank.json
+# User data: profile, resume, answers, application history, SQLite database,
+# generated resume versions, and the temp files the atomic writers leave behind
+# if the process dies mid-write. Everything under backend/data/ is private;
+# .gitkeep only exists so the empty directory can be committed.
+backend/data/*
+!backend/data/.gitkeep
 
 # IDE
 .vscode/
@@ -36,11 +35,6 @@ Thumbs.db
 
 # Extension build artifacts
 extension/web-ext-artifacts/
-
-# SQLite databases
-backend/data/*.db
-backend/data/*.db-shm
-backend/data/*.db-wal
 
 # Python bytecode (explicit)
 *.pyc

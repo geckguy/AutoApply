@@ -18,11 +18,15 @@ from pydantic import BaseModel, Field
 from backend.models.profile import UserProfile
 from backend.models.workspace import (
     AnswerVaultUpsert,
+    ApplicationPacketUpsert,
     ContactUpsert,
     FieldPolicyUpsert,
     FollowUpUpsert,
     InterviewUpsert,
     OpportunityPatch,
+    OpportunityUpsert,
+    PolicyToggleList,
+    TeachUpsert,
 )
 from backend.services.database import Database, get_database
 from backend.services.resume_documents import ResumeDocumentGenerator, apply_tailoring
@@ -126,7 +130,8 @@ def duplicate_opportunities(
 
 
 @router.post("/opportunities/upsert")
-def upsert_opportunity(payload: dict[str, Any] = Body(...)):
+def upsert_opportunity(body: OpportunityUpsert):
+    payload = body.model_dump(exclude_unset=True)
     company = str(payload.get("company") or "Unknown").strip()[:500]
     role = str(payload.get("role") or payload.get("page_title") or "Unknown").strip()[:500]
     url = str(payload.get("url") or "").strip()[:4096]
@@ -209,11 +214,10 @@ def save_policy(body: FieldPolicyUpsert):
 
 
 @router.put("/policies")
-def update_policy_toggles(payload: dict[str, Any] = Body(...)):
-    policies = payload.get("policies")
-    if not isinstance(policies, list):
-        raise HTTPException(status_code=422, detail="policies must be a list")
-    return {"policies": get_database().set_policies_enabled(policies)}
+def update_policy_toggles(payload: PolicyToggleList):
+    return {"policies": get_database().set_policies_enabled(
+        [item.model_dump(exclude_none=True) for item in payload.policies]
+    )}
 
 
 @router.get("/resume-versions")
@@ -270,23 +274,23 @@ def download_resume_version(version_id: str, format: str = Query(default="pdf", 
 
 
 @router.post("/application-packets")
-def save_application_packet(payload: dict[str, Any] = Body(...)):
-    opportunity_id = str(payload.get("opportunity_id") or "")
-    if not opportunity_id or not get_database().get_opportunity(opportunity_id):
+def save_application_packet(payload: ApplicationPacketUpsert):
+    item = payload.model_dump(exclude_unset=True)
+    item["id"] = payload.id
+    if not get_database().get_opportunity(item["opportunity_id"]):
         raise HTTPException(status_code=404, detail="Opportunity not found")
-    item = {**payload, "id": str(payload.get("id") or uuid4())}
     packet = get_database().upsert_packet(item)
     return {"packet": packet, "packet_id": packet["id"]}
 
 
 @router.post("/teaches")
-def save_teach(payload: dict[str, Any] = Body(...)):
-    field = payload.get("field") if isinstance(payload.get("field"), dict) else {}
+def save_teach(payload: TeachUpsert):
+    field = payload.field
     label = str(field.get("label") or field.get("id") or "unknown")
     mapping = get_database().upsert_learned_mapping(
         {
-            "field_label": label, "input_type": field.get("type"), "url": payload.get("url"),
-            "value": payload.get("corrected_value"), "confidence": "high",
+            "field_label": label, "input_type": field.get("type"), "url": payload.url,
+            "value": payload.corrected_value, "confidence": "high",
         }
     )
     return {"teach": mapping}
@@ -354,6 +358,9 @@ def dashboard_receipt(application_id: str, payload: dict[str, Any] = Body(...)):
 
 @router.post("/applications/{application_id}/relationships")
 def add_relationship(application_id: str, payload: dict[str, Any] = Body(...)):
+    db = get_database()
+    if not (db.get_opportunity(application_id) or db.get_application_by_id(application_id)):
+        raise HTTPException(status_code=404, detail="Application not found")
     name = str(payload.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=422, detail="A relationship name is required")
@@ -363,17 +370,20 @@ def add_relationship(application_id: str, payload: dict[str, Any] = Body(...)):
             "scheduled_at": payload.get("scheduled_at") or datetime.now(timezone.utc).isoformat(),
             "interview_type": "interview", "interviewer_names": [name], "notes": payload.get("notes"),
         }
-        return {"interview": get_database().add_interview(item)}
+        return {"interview": db.add_interview(item)}
     item = {**payload, "id": str(uuid4()), "opportunity_id": application_id, "relationship": payload.get("type", "contact")}
-    return {"contact": get_database().add_contact(item)}
+    return {"contact": db.add_contact(item)}
 
 
 @router.post("/applications/{application_id}/follow-ups")
 def add_follow_up(application_id: str, payload: dict[str, Any] = Body(...)):
+    db = get_database()
+    if not (db.get_opportunity(application_id) or db.get_application_by_id(application_id)):
+        raise HTTPException(status_code=404, detail="Application not found")
     if not payload.get("due_at"):
         raise HTTPException(status_code=422, detail="A follow-up due date is required")
     item = {**payload, "id": str(uuid4()), "opportunity_id": application_id, "notes": payload.get("notes") or payload.get("note")}
-    return {"follow_up": get_database().add_follow_up(item)}
+    return {"follow_up": db.add_follow_up(item)}
 
 
 @router.patch("/follow-ups/{follow_up_id}")
@@ -394,7 +404,10 @@ def patch_follow_up(follow_up_id: str, payload: dict[str, Any] = Body(...)):
 
 @router.post("/applications/{application_id}/interviews")
 def add_interview(application_id: str, body: InterviewUpsert):
-    return {"interview": get_database().add_interview({**body.model_dump(), "opportunity_id": application_id})}
+    db = get_database()
+    if not (db.get_opportunity(application_id) or db.get_application_by_id(application_id)):
+        raise HTTPException(status_code=404, detail="Application not found")
+    return {"interview": db.add_interview({**body.model_dump(), "opportunity_id": application_id})}
 
 
 @router.get("/answer-vault")

@@ -60,6 +60,7 @@ class FillResponse(BaseModel):
     instructions: list[FillInstruction] = Field(default_factory=list, max_length=500)
     fit_score: Optional[FitScore] = None
     duplicate_warning: Optional[str] = Field(default=None, max_length=2_000)
+    ai_error: Optional[str] = Field(default=None, max_length=2_000)
     local_count: int = Field(default=0, ge=0, le=500)
     ai_count: int = Field(default=0, ge=0, le=500)
     review_count: int = Field(default=0, ge=0, le=500)
