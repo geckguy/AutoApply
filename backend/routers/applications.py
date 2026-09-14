@@ -51,7 +51,7 @@ def log_application(application: Application):
         # The client supplies the id; a retry or double submit is not an error.
         raise HTTPException(
             status_code=409,
-            detail="An application with this id already exists",
+            detail="That application is already saved.",
         )
 
     logger.info(
@@ -119,7 +119,7 @@ def update_status(app_id: str, body: ApplicationStatusUpdate):
     found = db.update_application_status(app_id, body.status, body.notes)
 
     if not found:
-        raise HTTPException(status_code=404, detail=f"Application {app_id} not found")
+        raise HTTPException(status_code=404, detail="That application is no longer saved.")
 
     return {
         "status": "success",

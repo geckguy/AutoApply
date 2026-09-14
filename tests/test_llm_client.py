@@ -26,7 +26,10 @@ class ProviderConfigurationTests(unittest.TestCase):
             status = inspect_provider_configuration()
 
         self.assertFalse(status["configured"])
-        self.assertIn("Unsupported AI_PROVIDER", status["error"])
+        # The diagnostic keeps the env-var name for logs; the user-facing
+        # sentence must not carry it.
+        self.assertIn("Unsupported AI_PROVIDER", status["error_detail"])
+        self.assertNotIn("AI_PROVIDER", status["error"])
 
     def test_selected_provider_reports_public_readiness_only(self) -> None:
         secret = "test-secret-value"
@@ -59,7 +62,10 @@ class ProviderConfigurationTests(unittest.TestCase):
             status = inspect_provider_configuration()
 
         self.assertFalse(status["configured"])
-        self.assertIn("personal data", status["error"])
+        # The retention warning stays technical in the log line; the sentence a
+        # user reads never names the opt-in variable.
+        self.assertIn("personal data", status["error_detail"])
+        self.assertNotIn("OPENROUTER_PRIVACY_MODE", status["error"])
 
 
 class JsonExtractionTests(unittest.TestCase):

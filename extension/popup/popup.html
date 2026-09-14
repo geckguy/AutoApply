@@ -4,55 +4,58 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>AutoApply</title>
-  <link rel="stylesheet" href="popup.css?v=7">
+  <link rel="stylesheet" href="popup.css?v=8">
 </head>
 <body>
   <main class="launcher">
     <header class="launcher-header">
       <div class="brand"><img class="brand-mark" src="../icons/icon-48.svg" alt=""><span><strong>AutoApply</strong><small>Application assistant</small></span></div>
-      <div class="launcher-tools"><button id="theme-toggle" class="theme-toggle" type="button" aria-label="Color theme: System" title="Change color theme"><span aria-hidden="true">◐</span><small>System</small></button><span id="backend-status" class="status"><i></i><span>Checking…</span></span></div>
+      <div class="launcher-tools"><button id="theme-toggle" class="theme-toggle" type="button" aria-label="Color theme: System" title="Change color theme"><span aria-hidden="true">◐</span><small>System</small></button><span id="backend-status" class="status"><i aria-hidden="true"></i><span>Checking…</span></span></div>
     </header>
 
-    <div class="route" aria-label="Application workflow"><span class="active">Capture</span><i></i><span>Prepare</span><i></i><span>Apply</span><i></i><span>Follow up</span></div>
+    <div class="route" aria-label="Application workflow"><span>Capture</span><i></i><span>Prepare</span><i></i><span>Apply</span><i></i><span>Follow up</span></div>
 
     <section id="page-card" class="page-card">
       <p class="utility-label">Current page</p>
       <h1 id="page-title">Checking this tab…</h1>
-      <p id="page-copy">AutoApply is looking for an application form.</p>
+      <p id="page-copy" aria-live="polite">AutoApply is looking for an application form.</p>
       <button id="prepare-btn" class="primary-action" type="button" disabled>Prepare application<span>Review before anything is filled</span></button>
     </section>
 
     <section class="readiness" aria-labelledby="readiness-title">
       <div class="section-heading"><div><p class="utility-label">Readiness</p><h2 id="readiness-title">Ready to apply</h2></div><button id="open-setup" class="text-button" type="button">Review profile</button></div>
-      <div class="readiness-list">
-        <div id="ready-backend" class="readiness-row"><i></i><span><strong>Local backend</strong><small>Checking connection</small></span></div>
-        <div id="ready-profile" class="readiness-row"><i></i><span><strong>Profile & resume</strong><small>Checking reusable details</small></span></div>
-        <div id="ready-ai" class="readiness-row"><i></i><span><strong>AI provider</strong><small>Checking configuration</small></span></div>
+      <div class="readiness-list" aria-live="polite">
+        <div id="ready-backend" class="readiness-row neutral"><i aria-hidden="true"></i><span><strong>AutoApply app</strong><small>Checking…</small></span></div>
+        <div id="ready-profile" class="readiness-row neutral"><i aria-hidden="true"></i><span><strong>Profile &amp; resume</strong><small>Checking your saved details</small></span></div>
+        <div id="ready-ai" class="readiness-row neutral"><i aria-hidden="true"></i><span><strong>AI service</strong><small>Checking</small></span></div>
       </div>
     </section>
 
-    <section class="backend" aria-labelledby="backend-label">
+    <section id="offline-help" class="offline-help" hidden>
+      <strong>Start AutoApply on this computer</strong>
+      <p>AutoApply is an app that runs on this computer. Open it, then come back to this page.</p>
+      <button id="open-setup-card" class="offline-action" type="button">Open setup</button>
+    </section>
+
+    <p class="privacy-note">Your applications are saved on this computer. Resume text and job details are sent to the AI service you choose.</p>
+
+    <details id="app-address" class="backend">
+      <summary>AutoApply on this computer</summary>
       <form id="backend-form" class="backend-row">
-        <label id="backend-label" for="backend-base">Backend</label>
-        <input id="backend-base" type="url" spellcheck="false" inputmode="url" autocomplete="off" placeholder="http://127.0.0.1:8000" aria-describedby="backend-note">
+        <label id="backend-label" for="backend-base">Address</label>
+        <input id="backend-base" type="url" spellcheck="false" inputmode="url" autocomplete="off" aria-describedby="backend-note">
         <button type="submit">Save</button>
       </form>
-      <p id="backend-note" class="backend-note" role="status">Checking the stored backend address…</p>
-    </section>
-
-    <section id="offline-help" class="offline-help" hidden>
-      <strong>Start the local service</strong>
-      <code id="offline-command">source backend/venv/bin/activate<br>python -m backend.main</code>
-      <p id="offline-copy">Your profile stays local; the extension only talks to a loopback address.</p>
-    </section>
+      <p id="backend-note" class="backend-note" role="status">AutoApply is set up to talk to the app on this computer.</p>
+    </details>
 
     <footer class="launcher-footer">
-      <button id="open-workspace" type="button">Open workspace</button>
-      <button id="open-batch" type="button">Prepare a batch</button>
+      <button id="open-workspace" type="button">Open your applications</button>
+      <button id="open-batch" type="button">Prepare several at once</button>
     </footer>
   </main>
   <script src="../lib/browser-polyfill.js?v=2"></script>
   <script src="../lib/utils.js?v=3"></script>
-  <script src="popup.js?v=4"></script>
+  <script src="popup.js?v=5"></script>
 </body>
 </html>

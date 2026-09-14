@@ -39,6 +39,8 @@
   animation: autoapply-panel-in .28s cubic-bezier(.2,.8,.2,1);
 }
 .autoapply-overlay, .autoapply-overlay * { box-sizing: border-box; }
+/* Announcements only: the region is never visible, on any theme. */
+.autoapply-live-region { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
 .autoapply-overlay button, .autoapply-overlay select, .autoapply-overlay input, .autoapply-overlay textarea { font: inherit; }
 .autoapply-overlay.autoapply-dragging { user-select: none; }
 .autoapply-dragging .autoapply-header { cursor: grabbing; }
@@ -110,6 +112,7 @@
 
 .autoapply-fit-section { flex-shrink: 0; padding: 12px 16px; background: #fafbfe; border-bottom: 1px solid var(--aa-line); }
 .autoapply-fit-loading { display: flex; align-items: center; gap: 9px; color: var(--aa-muted); font-size: 11px; }
+.autoapply-fit-loading .autoapply-fit-retry { flex: 0 0 auto; width: auto; min-height: 30px; margin-left: auto; padding: 4px 10px; font-size: 11px; }
 .autoapply-fit-pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--aa-amber); animation: autoapply-pulse-dot 1.5s ease-in-out infinite; }
 .autoapply-fit-header { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
 .autoapply-fit-score { color: var(--aa-cobalt); font: 850 28px/1 "SFMono-Regular", Consolas, monospace; }
@@ -192,8 +195,10 @@
 .autoapply-overlay.autoapply-minimized { width: auto; max-height: none; border-radius: 7px; }
 .autoapply-mini-btn { display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer; font-weight: 700; }
 .autoapply-mini-btn:hover { background: var(--aa-paper-blue); }
-.autoapply-status { flex-shrink: 0; padding: 8px 16px; color: #0f665d; background: #e0f3ef; border-top: 1px solid #a9d8d0; font-size: 12px; text-align: center; }
+.autoapply-status { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px 8px 16px; color: #0f665d; background: #e0f3ef; border-top: 1px solid #a9d8d0; font-size: 12px; }
 .autoapply-status.error { color: #9f3838; background: #fde8e6; border-color: #efbbb5; }
+.autoapply-status-dismiss { flex-shrink: 0; width: 24px; height: 24px; padding: 0; color: inherit; background: none; border: 1px solid transparent; border-radius: 4px; font-size: 12px; line-height: 1; cursor: pointer; }
+.autoapply-status-dismiss:hover { border-color: currentColor; }
 
 .autoapply-autopilot-status { display: flex; align-items: center; gap: 12px; min-height: 80px; padding: 20px 16px; }
 .autoapply-autopilot-indicator { flex-shrink: 0; width: 12px; height: 12px; border-radius: 50%; }
@@ -206,6 +211,9 @@
 .autoapply-duplicate-choice { padding: 20px 16px 22px; }
 .autoapply-duplicate-choice h2 { margin: 0; color: var(--aa-navy); font: 800 21px "Avenir Next Condensed","Arial Narrow",sans-serif; }
 .autoapply-duplicate-choice p:not(.autoapply-kicker) { color: var(--aa-muted); }
+.autoapply-autorun-confirm { padding: 20px 16px 22px; }
+.autoapply-autorun-confirm h2 { margin: 0 0 8px; color: var(--aa-navy); font: 800 21px/1.12 "Avenir Next Condensed","Arial Narrow",sans-serif; letter-spacing: -.025em; }
+.autoapply-autorun-confirm p:not(.autoapply-kicker) { color: var(--aa-muted); font-size: 12px; }
 .autoapply-choice-actions { display: grid; gap: 8px; margin-top: 16px; }
 .autoapply-empty-fields { padding: 26px 14px; color: var(--aa-muted); text-align: center; }
 
@@ -250,6 +258,7 @@
 .autoapply-overlay[data-theme="dark"] .autoapply-opportunity-heading .autoapply-kicker { color: #91a4ff; }
 .autoapply-overlay[data-theme="dark"] .autoapply-opportunity-heading .autoapply-prep-summary span { color: #bdc7d6; background: #121b2c; border-color: #40516c; }
 .autoapply-overlay[data-theme="dark"] .autoapply-duplicate-choice h2,
+.autoapply-overlay[data-theme="dark"] .autoapply-autorun-confirm h2,
 .autoapply-overlay[data-theme="dark"] .autoapply-btn-secondary,
 .autoapply-overlay[data-theme="dark"] .autoapply-more-actions > summary { color: var(--aa-ink); }
 .autoapply-overlay[data-theme="dark"] .autoapply-fit-section,

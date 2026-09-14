@@ -52,9 +52,43 @@ const AutoApplyUtils = (() => {
    */
   async function setApiBase(base) {
     const normalized = normalizeApiBase(base);
-    if (!normalized) throw new Error(`Enter a loopback http address such as ${DEFAULT_API_BASE}.`);
+    if (!normalized) throw new Error(`Enter the AutoApply address on this computer, for example ${DEFAULT_API_BASE}.`);
     await browser.storage.local.set({ [API_BASE_STORAGE_KEY]: normalized });
     return normalized;
+  }
+
+  /**
+   * Build the Error thrown by apiCall().
+   *
+   * The sentence a user reads is plain language; the HTTP status and the
+   * backend's own detail travel as properties so callers can classify a
+   * failure (missing profile, provider unavailable, rate limit) without
+   * printing internals into the UI.
+   *
+   * @param {number|undefined} status - HTTP status, when one was received
+   * @param {string|undefined} detail - Backend-provided detail, already plain
+   * @returns {Error} Error with `status` and `detail` properties
+   */
+  function buildRequestError(status, detail) {
+    const fallback = 'AutoApply could not complete that request. Try again in a moment.';
+    const message = typeof status === 'number' && status >= 500
+      ? fallback
+      : (detail || fallback);
+    const error = new Error(message);
+    if (typeof status === 'number') error.status = status;
+    if (detail) error.detail = detail;
+    return error;
+  }
+
+  /** Pull the backend's own message out of a response body, if it has one. */
+  async function responseDetail(response) {
+    const text = await response.text().catch(() => '');
+    try {
+      const parsed = JSON.parse(text);
+      return parsed && (parsed.detail || parsed.ai_error) ? String(parsed.detail || parsed.ai_error) : text;
+    } catch (_) {
+      return text;
+    }
   }
 
   /**
@@ -74,9 +108,11 @@ const AutoApplyUtils = (() => {
       });
       if (response && response.status === 'success') {
         return response.data;
-      } else {
-        throw new Error(response ? response.error : 'Unknown background proxy error');
       }
+      throw buildRequestError(
+        response ? response.httpStatus : undefined,
+        (response && (response.detail || response.error)) || undefined
+      );
     }
 
     // Fallback if not in extension context
@@ -95,8 +131,7 @@ const AutoApplyUtils = (() => {
 
     const res = await fetch(url, options);
     if (!res.ok) {
-      const errorText = await res.text();
-      throw new Error(`API error ${res.status}: ${errorText}`);
+      throw buildRequestError(res.status, await responseDetail(res));
     }
     return res.json();
   }

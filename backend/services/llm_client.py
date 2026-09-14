@@ -85,7 +85,7 @@ class RateLimiter:
                     return
             if sleep_time > self.max_wait:
                 raise ProviderBusy(
-                    f"AI provider rate limit reached; retry in {sleep_time:.0f}s."
+                    f"AutoApply is busy right now. Try again in {sleep_time:.0f} seconds."
                 )
             logger.info(f"Rate limit: waiting {sleep_time:.1f}s...")
             time.sleep(sleep_time)
@@ -110,6 +110,21 @@ _PROVIDER_SETTINGS = {
 }
 
 
+# Names and sentences that can reach the UI. A user-visible sentence never names
+# an env var, a port, or an HTTP status code; the technical wording travels in
+# the separate `error_detail` key, which only logs consume.
+_PROVIDER_DISPLAY_NAMES = {
+    "gemini": "Google Gemini",
+    "openrouter": "OpenRouter",
+    "opencode": "OpenCode Go",
+}
+
+
+def provider_display_name(provider: str) -> str:
+    """Return the name of an AI service as the user sees it."""
+    return _PROVIDER_DISPLAY_NAMES.get(provider, "the AI service")
+
+
 def _is_placeholder(value: str) -> bool:
     """Return whether an API-key value is an example/template placeholder."""
     normalized = value.strip().lower()
@@ -121,11 +136,32 @@ def _is_placeholder(value: str) -> bool:
     )
 
 
+def provider_settings(provider: str) -> dict[str, str | None]:
+    """Return the env-var names and default model for a provider."""
+    return dict(_PROVIDER_SETTINGS.get(provider, {}))
+
+
+def stored_key_state(provider: str) -> tuple[bool, str | None]:
+    """Return (usable key stored, masked hint) for a provider.
+
+    The hint is the key's last four characters behind six dots; the stored key
+    itself is never returned by any endpoint.
+    """
+    settings = _PROVIDER_SETTINGS.get(provider)
+    value = os.getenv(settings["api_key_env"], "").strip() if settings else ""
+    if _is_placeholder(value):
+        return False, None
+    return True, f"••••••{value[-4:]}"
+
+
 def inspect_provider_configuration() -> dict[str, str | bool | None]:
     """Inspect LLM setup without creating a client or making a network request.
 
     This is safe to call from a health endpoint. It intentionally returns only
     public configuration state: API keys are never included in the response.
+
+    `error` is the sentence the user reads; `error_detail` is the technical
+    wording for logs only. Both are None when the provider is configured.
     """
     provider = os.getenv("AI_PROVIDER", DEFAULT_PROVIDER).strip().lower() or DEFAULT_PROVIDER
     if provider not in SUPPORTED_PROVIDERS:
@@ -134,7 +170,8 @@ def inspect_provider_configuration() -> dict[str, str | bool | None]:
             "provider": provider,
             "model": None,
             "configured": False,
-            "error": f"Unsupported AI_PROVIDER '{provider}'. Use one of: {supported}.",
+            "error": "AutoApply doesn't recognize this AI service. Choose one from the list.",
+            "error_detail": f"Unsupported AI_PROVIDER '{provider}'. Use one of: {supported}.",
         }
 
     settings = _PROVIDER_SETTINGS[provider]
@@ -146,13 +183,15 @@ def inspect_provider_configuration() -> dict[str, str | bool | None]:
         if model_env
         else settings["default_model"]
     ) or settings["default_model"]
+    display_name = provider_display_name(provider)
 
     if _is_placeholder(api_key):
         return {
             "provider": provider,
             "model": model,
             "configured": False,
-            "error": f"Set a valid {api_key_env} in backend/.env for {provider}.",
+            "error": f"Add your {display_name} key to finish setup.",
+            "error_detail": f"Set a valid {api_key_env} in backend/.env for {provider}.",
         }
 
     if not model:
@@ -160,7 +199,8 @@ def inspect_provider_configuration() -> dict[str, str | bool | None]:
             "provider": provider,
             "model": None,
             "configured": False,
-            "error": f"Set {model_env} explicitly in backend/.env.",
+            "error": "Choose which AI model to use in AutoApply.",
+            "error_detail": f"Set {model_env} explicitly in backend/.env.",
         }
 
     if provider == "openrouter":
@@ -170,7 +210,8 @@ def inspect_provider_configuration() -> dict[str, str | bool | None]:
                 "provider": provider,
                 "model": model,
                 "configured": False,
-                "error": "OPENROUTER_PRIVACY_MODE must be 'strict' or 'allow'.",
+                "error": "The saved AI service settings are incomplete. Finish setup again.",
+                "error_detail": "OPENROUTER_PRIVACY_MODE must be 'strict' or 'allow'.",
             }
         if privacy_mode == "strict" and str(model).endswith(":free"):
             return {
@@ -178,6 +219,10 @@ def inspect_provider_configuration() -> dict[str, str | bool | None]:
                 "model": model,
                 "configured": False,
                 "error": (
+                    "This free AI model may keep copies of your details. "
+                    "Choose a paid model instead."
+                ),
+                "error_detail": (
                     "OpenRouter free endpoints may retain personal data. Choose a "
                     "privacy-compatible paid model, or explicitly set "
                     "OPENROUTER_PRIVACY_MODE=allow after reviewing provider terms."
@@ -189,6 +234,7 @@ def inspect_provider_configuration() -> dict[str, str | bool | None]:
         "model": model,
         "configured": True,
         "error": None,
+        "error_detail": None,
     }
 
 
@@ -219,7 +265,7 @@ def provider_status_line() -> str:
     if configuration["configured"]:
         return f"AI provider ready: {configuration['provider']} ({configuration['model']})"
     return (
-        f"AI provider unavailable: {configuration['error']} "
+        f"AI provider unavailable: {configuration['error_detail']} "
         "AI-assisted features will fail until this is fixed."
     )
 
@@ -334,7 +380,9 @@ def get_llm_client() -> LLMClient:
                     from backend.services.gemini import GeminiClient
                     _client = GeminiClient()
                 else:  # Defensive guard: inspect_provider_configuration validates this.
-                    raise ProviderNotConfigured(f"Unsupported AI_PROVIDER '{provider}'.")
+                    raise ProviderNotConfigured(
+                        "AutoApply doesn't recognize this AI service. Choose one from the list."
+                    )
                 logger.info(
                     f"LLM client initialized: provider={_client.provider_name}, "
                     f"model={_client.model_name}"

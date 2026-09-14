@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "name": "AutoApply",
   "version": "1.0.1",
-  "description": "AI-powered job application autofill agent - scrapes forms, maps your profile, fills intelligently.",
+  "description": "Prepares your job applications in the browser: fills in the details you saved and lets you review everything before you submit.",
   "permissions": [
     "activeTab",
     "storage",

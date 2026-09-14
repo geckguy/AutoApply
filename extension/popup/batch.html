@@ -3,36 +3,37 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Batch preparation · AutoApply</title>
-  <link rel="stylesheet" href="batch.css?v=6">
+  <title>Prepare several at once · AutoApply</title>
+  <link rel="stylesheet" href="batch.css?v=7">
 </head>
 <body>
   <main class="batch-shell">
     <header class="batch-header">
-      <div class="brand"><img class="brand-mark" src="../icons/icon-48.svg" alt=""><span><strong>AutoApply</strong><small>Batch preparation</small></span></div>
-      <div class="batch-header-actions"><label class="theme-control" for="theme-select"><span aria-hidden="true">◐</span><span class="visually-hidden">Color theme</span><select id="theme-select" aria-label="Color theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label><button id="open-workspace" class="button secondary" type="button">Open workspace</button></div>
+      <div class="brand"><img class="brand-mark" src="../icons/icon-48.svg" alt=""><span><strong>AutoApply</strong><small>Prepare several at once</small></span></div>
+      <div class="batch-header-actions"><label class="theme-control" for="theme-select"><span aria-hidden="true">◐</span><span class="visually-hidden">Color theme</span><select id="theme-select" aria-label="Color theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label><button id="open-workspace" class="button secondary" type="button">Open your applications</button></div>
     </header>
     <section class="hero">
       <p class="utility-label">Capture → prepare</p>
       <h1>Build a review queue,<br>not a pile of open tabs.</h1>
-      <p>AutoApply will inspect each role, prepare suggested answers, and save it for review. It will not fill or submit any form.</p>
+      <p>AutoApply will look at each application, prepare suggested answers, and save it for review. It will not fill or submit any form.</p>
     </section>
     <section class="batch-grid">
       <form id="batch-form" class="surface input-panel">
-        <div><p class="utility-label">Job URLs</p><h2>Add one application URL per line</h2></div>
-        <textarea id="batch-urls" rows="12" required placeholder="https://company.example/jobs/123/apply&#10;https://another.example/careers/456"></textarea>
-        <div class="form-foot"><span id="url-count">0 valid URLs</span><button class="button primary" type="submit">Prepare queue</button></div>
+        <div><label class="utility-label" for="batch-urls">Job URLs</label><h2>Add one application URL per line</h2></div>
+        <textarea id="batch-urls" rows="12" required aria-describedby="url-count" placeholder="https://company.example/jobs/123/apply&#10;https://another.example/careers/456"></textarea>
+        <div class="form-foot"><span id="url-count" role="status">0 valid URLs</span><button class="button primary" type="submit">Start preparing</button></div>
       </form>
       <section class="surface queue-panel">
-        <div class="queue-heading"><div><p class="utility-label">Persistent queue</p><h2>Preparation progress</h2></div><button id="clear-complete" class="text-button" type="button">Clear finished</button></div>
-        <div id="batch-summary" class="batch-summary"><span>Waiting</span><strong>Nothing queued</strong></div>
-        <div id="batch-list" class="batch-list"><div class="empty">Paste URLs to begin. This page can stay open while AutoApply works in the background.</div></div>
+        <div class="queue-heading"><div><p class="utility-label">Progress</p><h2>Preparation list</h2></div><button id="clear-complete" class="text-button" type="button">Remove finished</button></div>
+        <div id="batch-summary" class="batch-summary"><span>Preparation status</span><strong>0/0 prepared</strong></div>
+        <div id="batch-list" class="batch-list"><div class="empty">Add job links to begin. Keep this page open while AutoApply works.</div></div>
+        <p id="batch-announcer" class="visually-hidden" role="status" aria-live="polite"></p>
       </section>
     </section>
   </main>
-  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div id="toast" class="toast"><span id="toast-message" role="status" aria-live="polite"></span><button id="toast-undo" class="toast-undo" type="button" hidden>Undo</button></div>
   <script src="../lib/browser-polyfill.js"></script>
   <script src="../lib/utils.js"></script>
-  <script src="batch.js?v=3"></script>
+  <script src="batch.js?v=4"></script>
 </body>
 </html>

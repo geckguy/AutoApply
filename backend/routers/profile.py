@@ -99,7 +99,7 @@ async def upload_resume(file: UploadFile = File(...)):
     if not provider["configured"]:
         raise HTTPException(
             status_code=503,
-            detail=f"Resume parsing needs an AI provider. {provider['error']}",
+            detail=f"Reading your resume needs the AI service. {provider['error']}",
         )
 
     temp_fd, temp_name = tempfile.mkstemp(

@@ -21,12 +21,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function applyApiBase(base) {
     apiBase = base;
     $('#backend-base').value = base;
-    const port = new URL(base).port || '80';
-    $('#offline-command').innerHTML = port === '8000'
-      ? 'source backend/venv/bin/activate<br>python -m backend.main'
-      : `source backend/venv/bin/activate<br>uvicorn backend.main:app --port ${port}`;
-    $('#offline-copy').textContent = `Your profile stays local; the extension only talks to ${base}.`;
-    setBackendNote(`AutoApply talks to ${base}.`, false);
+    setBackendNote('AutoApply is set up to talk to the app on this computer.', false);
   }
 
   async function initializeApiBase() {
@@ -50,28 +45,47 @@ document.addEventListener('DOMContentLoaded', () => {
     applyTheme();
   }
 
-  function setReadiness(id, ready, title, detail) {
+  /** state is 'ready', 'error' (required and missing) or 'neutral' (optional). */
+  function setReadiness(id, state, title, detail) {
     const row = $(id);
-    row.className = `readiness-row ${ready ? 'ready' : 'error'}`;
+    row.className = `readiness-row ${state}`;
     row.querySelector('strong').textContent = title;
     row.querySelector('small').textContent = detail;
   }
 
+  /** Known application platforms. A fast path; the page itself is asked next. */
   function looksLikeApplication(url, title = '') {
     if (!/^https?:/i.test(url || '')) return false;
     const value = `${url} ${title}`.toLowerCase();
     return /(workdayjobs|greenhouse|lever\.co|ashbyhq|icims|smartrecruiters|taleo|oraclecloud|darwinbox|keka|\/apply(?:\/|\?|$)|application)/.test(value);
   }
 
+  /**
+   * Ask the page whether it holds a fillable form. The content script owns that
+   * check, so the popup and the on-page prompt agree on one verdict.
+   */
+  async function pageHasApplicationForm(tabId) {
+    if (!tabId) return false;
+    try {
+      const answer = await browser.tabs.sendMessage(tabId, { type:'AA_DETECT_APPLICATION' });
+      return answer?.detected === true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   async function inspectPage() {
     try {
       [activeTab] = await browser.tabs.query({ active:true, currentWindow:true });
-      pageReady = looksLikeApplication(activeTab?.url, activeTab?.title);
-      $('#page-title').textContent = pageReady ? (activeTab.title || 'Application page').replace(/\s[-|].*$/, '').slice(0, 62) : 'No application detected';
-      $('#page-copy').textContent = pageReady ? 'Prepare fields and review anything uncertain before filling.' : 'Open a job application page, then return here.';
+      pageReady = looksLikeApplication(activeTab?.url, activeTab?.title) || await pageHasApplicationForm(activeTab?.id);
+      const pageName = (activeTab?.title || '').replace(/\s[-|].*$/, '').slice(0, 62);
+      $('#page-title').textContent = pageReady ? (pageName || 'Application page') : 'Nothing here looked like an application form';
+      $('#page-copy').textContent = pageReady
+        ? 'Review anything uncertain before it is filled.'
+        : 'If this page has a form, prepare it anyway. You can review everything before it is filled.';
     } catch (_) {
-      $('#page-title').textContent = 'This tab is unavailable';
-      $('#page-copy').textContent = 'Open a regular job application page and try again.';
+      $('#page-title').textContent = 'This tab cannot be read';
+      $('#page-copy').textContent = 'Open the job application in a regular browser tab and try again.';
     }
     updatePrimaryAction();
   }
@@ -84,42 +98,46 @@ document.addEventListener('DOMContentLoaded', () => {
       aiReady = Boolean(health.ai_ready);
       $('#backend-status').className = 'status ready';
       $('#backend-status span').textContent = 'Connected';
-      setReadiness('#ready-backend', true, 'Local backend', `Connected to ${apiBase}`);
-      setReadiness('#ready-profile', profileReady, 'Profile & resume', profileReady ? 'Ready to reuse' : 'Upload and verify your resume');
-      setReadiness('#ready-ai', aiReady, 'AI provider', aiReady ? `${health.ai_provider} · ${health.ai_model}` : (health.ai_error || 'Add a provider key in backend/.env'));
+      setReadiness('#ready-backend', 'ready', 'AutoApply app', 'Connected on this computer');
+      setReadiness('#ready-profile', profileReady ? 'ready' : 'error', 'Profile & resume', profileReady ? 'Ready to reuse' : 'Add your resume and contact details');
+      setReadiness('#ready-ai', aiReady ? 'ready' : 'neutral', 'AI service', aiReady ? 'Connected' : 'Not set up — review suggestions will be unavailable');
       $('#offline-help').hidden = true;
     } catch (_) {
       backendReady = profileReady = aiReady = false;
       $('#backend-status').className = 'status error';
-      $('#backend-status span').textContent = 'Offline';
-      setReadiness('#ready-backend', false, 'Local backend', `Start the service at ${apiBase}`);
-      setReadiness('#ready-profile', false, 'Profile & resume', 'Available after the backend starts');
-      setReadiness('#ready-ai', false, 'AI provider', 'Available after the backend starts');
+      $('#backend-status span').textContent = 'Not running';
+      setReadiness('#ready-backend', 'error', 'AutoApply app', 'Can’t reach AutoApply. Start it on this computer');
+      setReadiness('#ready-profile', 'error', 'Profile & resume', 'AutoApply can’t check this until it is running');
+      setReadiness('#ready-ai', 'neutral', 'AI service', 'AutoApply can’t check this until it is running');
       $('#offline-help').hidden = false;
     }
     updatePrimaryAction();
   }
 
+  /**
+   * The page never blocks the primary action: when nothing looks like an
+   * application, the same button still starts the flow on the current page.
+   */
   function updatePrimaryAction() {
     const button = $('#prepare-btn');
-    button.disabled = !(backendReady && profileReady && pageReady);
-    if (!backendReady) button.innerHTML = 'Start the local backend<span>Then return to this application page</span>';
-    else if (!profileReady) button.innerHTML = 'Finish profile setup<span>A resume and contact details are required</span>';
-    else if (!pageReady) button.innerHTML = 'Open an application page<span>AutoApply will wait here</span>';
-    else if (!aiReady) button.innerHTML = 'Prepare application<span>Local answers only · AI suggestions are unavailable</span>';
+    button.disabled = !(backendReady && profileReady);
+    if (!backendReady) button.innerHTML = 'Start AutoApply<span>Then come back to this page</span>';
+    else if (!profileReady) button.innerHTML = 'Add your resume and details<span>AutoApply needs them before it can prepare</span>';
+    else if (!pageReady) button.innerHTML = 'Prepare this page anyway<span>AutoApply will look for a form here</span>';
+    else if (!aiReady) button.innerHTML = 'Prepare application<span>Saved details still fill in</span>';
     else button.innerHTML = 'Prepare application<span>Review before anything is filled</span>';
   }
 
   $('#prepare-btn').addEventListener('click', async () => {
     if (!activeTab?.id) return;
     $('#prepare-btn').disabled = true;
-    $('#prepare-btn').innerHTML = 'Preparing…<span>Scanning fields and building your review</span>';
+    $('#prepare-btn').innerHTML = 'Preparing…<span>Looking for the form and building your review</span>';
     try {
       const response = await browser.runtime.sendMessage({ type:'START_AUTOFILL' });
-      if (response?.status !== 'success') throw new Error(response?.error || 'AutoApply could not start on this tab.');
+      if (response?.status !== 'success') throw new Error('AutoApply did not start');
       window.close();
-    } catch (error) {
-      $('#page-copy').textContent = `AutoApply could not access this tab (${error.message}). Reload the page and try again.`;
+    } catch (_) {
+      $('#page-copy').textContent = 'AutoApply couldn’t start on this page. Reload the page and try again.';
       updatePrimaryAction();
     }
   });
@@ -128,10 +146,11 @@ document.addEventListener('DOMContentLoaded', () => {
     event.preventDefault();
     try {
       applyApiBase(await UTILS.setApiBase($('#backend-base').value));
-      setBackendNote(`Saved. AutoApply now talks to ${apiBase}.`, false);
+      setBackendNote('Saved. AutoApply will use this address.', false);
       await inspectBackend();
-    } catch (error) {
-      setBackendNote(error.message, true);
+    } catch (_) {
+      $('#app-address').open = true;
+      setBackendNote('That address didn’t work. Copy the address from the AutoApply app on this computer.', true);
     }
   });
 
@@ -139,6 +158,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const openDashboard = async (path) => openUrl(`${await UTILS.getApiBase()}${path}`);
   $('#open-workspace').addEventListener('click', () => openDashboard('/dashboard'));
   $('#open-setup').addEventListener('click', () => openDashboard('/dashboard#profile'));
+  $('#open-setup-card').addEventListener('click', () => openDashboard('/dashboard#profile'));
   $('#open-batch').addEventListener('click', () => openUrl(browser.runtime.getURL('popup/batch.html')));
   $('#theme-toggle').addEventListener('click', async () => {
     themePreference = themeOrder[(themeOrder.indexOf(themePreference) + 1) % themeOrder.length];

@@ -120,10 +120,10 @@ const AutoApplyFiller = (() => {
   async function fillField(instruction, options = {}) {
     const { field_id, action, value } = instruction;
     if (action === 'skip') {
-      return { ok: false, field_id, action, reason: 'Skipped by the mapping.', reformatted: false };
+      return { ok: false, field_id, action, reason: 'No matching answer for this field.', reformatted: false };
     }
     if (value === undefined || value === null) {
-      return { ok: false, field_id, action, reason: 'No value was supplied for this field.', reformatted: false };
+      return { ok: false, field_id, action, reason: 'AutoApply has no saved answer for this question.', reformatted: false };
     }
 
     // Find the element by ID or data attribute. A radio group shares one
@@ -174,20 +174,20 @@ const AutoApplyFiller = (() => {
             reason = upload && upload.reason ? upload.reason : 'The resume could not be attached automatically.';
           } else {
             highlightUploadField(el);
-            reason = 'Choose a resume version to attach automatically, or select the file manually.';
+            reason = 'Choose a saved resume to attach it automatically, or select the file yourself.';
           }
           break;
 
         default:
           console.warn(`[AutoApply] Unknown action: ${action}`);
-          reason = `Unsupported fill action: ${action}.`;
+          reason = 'AutoApply could not fill this field.';
       }
       const outcome = { ok, field_id, action, reason: ok ? '' : reason, reformatted: Boolean(reformattedValue) };
       if (reformattedValue) outcome.landed_value = reformattedValue;
       return outcome;
     } catch (err) {
       console.error(`[AutoApply] Error filling ${field_id}:`, err);
-      return { ok: false, field_id, action, reason: err.message || 'The page prevented this field from being filled.', reformatted: false };
+      return { ok: false, field_id, action, reason: 'The page prevented this field from being filled.', reformatted: false };
     }
   }
 

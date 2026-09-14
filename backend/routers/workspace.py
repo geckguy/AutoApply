@@ -87,12 +87,14 @@ def _ensure_master_resume(db: Database) -> None:
 def _ensure_default_policies(db: Database) -> None:
     if db.list_policies():
         return
+    # Labels and descriptions are shown in the dashboard's fill-rules list, so
+    # they stay in plain language; the keys and actions underneath do not change.
     defaults = [
-        ("email", "Contact information", "always", "Use verified profile contact details."),
-        ("authorized_to_work", "Work authorization", "ask_every_time", "Review legal answers before filling."),
-        ("sponsorship_required", "Visa sponsorship", "ask_every_time", "Review sponsorship answers before filling."),
-        ("gender", "Demographic questions", "ask_every_time", "Never infer sensitive demographic data."),
-        ("salary_expectation", "Salary expectations", "ask_every_time", "Review compensation answers for each role."),
+        ("email", "Contact information", "always", "Fills in from the details you saved."),
+        ("authorized_to_work", "Work authorization", "ask_every_time", "Asks you first every time."),
+        ("sponsorship_required", "Visa sponsorship", "ask_every_time", "Asks you first every time."),
+        ("gender", "Questions about you", "ask_every_time", "Never guessed. Asks you first."),
+        ("salary_expectation", "Salary expectations", "ask_every_time", "Asks you first every time."),
     ]
     for key, label, action, description in defaults:
         db.upsert_policy(

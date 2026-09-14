@@ -88,7 +88,7 @@ def autofill(form_schema: FormSchema):
     if not profile:
         raise HTTPException(
             status_code=404,
-            detail="No profile found. Upload a resume first at /api/profile/upload-resume",
+            detail="Add your resume in AutoApply before preparing an application.",
         )
 
     knowledge = _load_knowledge()
@@ -183,7 +183,7 @@ def analyze_job(body: JobDescriptionRequest):
     if not profile:
         raise HTTPException(
             status_code=404,
-            detail="No profile found. Upload a resume first.",
+            detail="Add your resume in AutoApply before preparing an application.",
         )
 
     knowledge = _load_knowledge()
@@ -243,7 +243,7 @@ def generate_cover_letter(body: CoverLetterRequest):
     if not profile:
         raise HTTPException(
             status_code=404,
-            detail="No profile found. Upload a resume first.",
+            detail="Add your resume in AutoApply before preparing an application.",
         )
     
     knowledge = _load_knowledge()
@@ -264,7 +264,7 @@ def tailor_resume(body: JobDescriptionRequest):
     if not profile:
         raise HTTPException(
             status_code=404,
-            detail="No profile found. Upload a resume first.",
+            detail="Add your resume in AutoApply before preparing an application.",
         )
     
     knowledge = _load_knowledge()

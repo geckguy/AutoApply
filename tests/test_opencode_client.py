@@ -80,7 +80,11 @@ class ProviderConfigurationTests(_EnvIsolated):
 
         self.assertFalse(configuration["configured"])
         self.assertEqual(configuration["provider"], "opencode")
-        self.assertIn("OPENCODE_MODEL", str(configuration["error"]))
+        # The env-var name is the log-line diagnostic; the user reads the plain
+        # sentence that says what to do next.
+        self.assertIn("OPENCODE_MODEL", str(configuration["error_detail"]))
+        self.assertNotIn("OPENCODE_MODEL", str(configuration["error"]))
+        self.assertIn("model", configuration["error"])
 
     def test_get_llm_client_builds_the_opencode_client(self):
         os.environ["AI_PROVIDER"] = "opencode"

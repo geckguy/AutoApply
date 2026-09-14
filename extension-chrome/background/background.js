@@ -69,19 +69,19 @@ function fileNameFromDisposition(value) {
 
 async function fetchResumeVersion(versionId) {
   if (typeof versionId !== 'string' || !versionId.trim()) {
-    throw new Error('Choose a resume version before attaching it.');
+    throw new Error('Choose which resume to attach first.');
   }
   const base = await AutoApplyUtils.getApiBase();
   const response = await fetch(
     `${base}/api/workspace/resume-versions/${encodeURIComponent(versionId)}/download`,
     { signal: AbortSignal.timeout(30000) }
   );
-  if (!response.ok) throw new Error(`Resume download failed (${response.status}).`);
+  if (!response.ok) throw new Error('AutoApply could not open that resume. Try again.');
   const contentLength = Number(response.headers.get('content-length') || 0);
-  if (contentLength > MAX_RESUME_BYTES) throw new Error('Selected resume is larger than 10MB.');
+  if (contentLength > MAX_RESUME_BYTES) throw new Error('That resume is larger than 10 MB. Try a smaller file.');
   const bytes = new Uint8Array(await response.arrayBuffer());
   if (!bytes.length || bytes.length > MAX_RESUME_BYTES) {
-    throw new Error('Selected resume is empty or larger than 10MB.');
+    throw new Error('That resume file is empty or larger than 10 MB.');
   }
   return {
     base64: bytesToBase64(bytes),
@@ -93,7 +93,7 @@ async function fetchResumeVersion(versionId) {
 
 async function startAutofillOnActiveTab() {
   const tabs = await browser.tabs.query({ active: true, currentWindow: true });
-  if (!tabs || !tabs[0]) throw new Error('No active tab found.');
+  if (!tabs || !tabs[0]) throw new Error('Open the job page in a tab, then try again.');
   await updateExtensionState({ status: 'scanning', lastActiveTabId: tabs[0].id });
   try {
     const response = await browser.tabs.sendMessage(tabs[0].id, { type: 'START_AUTOFILL' });
@@ -122,8 +122,8 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     mutateExtensionState((state) => ({ ...state, todayCount: state.todayCount + 1 }))
       .then((state) => {
         showNotification(
-          'Application Logged',
-          `Applied to ${message.data.role} at ${message.data.company}. Total today: ${state.todayCount}`
+          'Application saved',
+          `You applied to ${message.data.role} at ${message.data.company}. ${state.todayCount} today.`
         );
         sendResponse({ status: 'success' });
       })
@@ -164,7 +164,7 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     AutoApplyUtils.getApiBase()
       .then((base) => fetch(`${base}/api/applications/?limit=5`, { signal: AbortSignal.timeout(30000) }))
       .then((res) => {
-        if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+        if (!res.ok) throw new Error('AutoApply could not load your recent applications.');
         return res.json();
       })
       .then((data) => {
@@ -188,7 +188,7 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'OPEN_WORKSPACE_RECORD') {
     const opportunityId = String(message.opportunity_id || '').trim();
     if (!opportunityId) {
-      sendResponse({ status: 'error', error: 'Missing opportunity ID.' });
+      sendResponse({ status: 'error', error: 'AutoApply could not tell which application to open.' });
       return false;
     }
     AutoApplyUtils.getApiBase()
@@ -216,7 +216,17 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const res = await fetch(`${base}${message.endpoint}`, options);
         if (!res.ok) {
           const text = await res.text();
-          throw new Error(`API error ${res.status}: ${text}`);
+          let detail = text;
+          try {
+            const parsed = JSON.parse(text);
+            detail = String(parsed.detail || parsed.ai_error || text);
+          } catch (_) {
+            // Not JSON: keep the raw text as the detail.
+          }
+          // The sentence the user reads is built by utils.buildRequestError();
+          // the status and detail travel separately so callers can classify.
+          sendResponse({ status: 'error', error: detail, httpStatus: res.status, detail });
+          return;
         }
         sendResponse({ status: 'success', data: await res.json() });
       } catch (err) {

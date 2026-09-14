@@ -31,8 +31,14 @@
   let pageChangeTimer = null; // Bounds the page-change wait so a silent observer can never hang the flow.
   let pendingPageChange = null; // Resolver of the in-flight page-change wait.
   let flowInFlight = false; // Guards against a concurrent scan; cleared when the flow settles.
+  let fillInFlight = false; // Guards against a concurrent fill; cleared when the fill settles.
   let dismissedUrl = null; // URL the user explicitly closed the panel on (resets on navigation).
   let previousFocus = null; // Element focused before the panel opened, restored on close.
+  let liveRegionEl = null; // Polite live region; it survives every panel re-render.
+  let hostPageHidden = false; // The page behind the panel is hidden from screen readers.
+  let fitAnalysisState = 'idle'; // idle | pending | ready | failed
+  let fitAnalysisMessage = ''; // Plain sentence shown when no score is available.
+  let fitAnalysisTimer = null; // Bounds the pending state so it cannot spin forever.
   let aiWarning = ''; // Non-fatal AI provider problem reported by the backend.
   let resolvedDuplicate = null; // { url, resolution, existingId } — the user's answer on this page.
   let lastFilledPageSignature = null; // Page signature at the last AutoPilot fill.
@@ -62,6 +68,7 @@
   const FRAME_FILL_TIMEOUT_MS = 8000; // Deadline for an embedded frame's fill reply.
   const CHIP_MOUNT_DEBOUNCE_MS = 300; // Page mutations are batched before the mount gate is re-read.
   const CHIP_MOUNT_RETRY_MS = 15000; // Bounded window for a client-rendered form to appear.
+  const FIT_ANALYSIS_TIMEOUT_MS = 20000; // A pending match score becomes a retry control.
   let fieldFailures = new Map();
   // Cross-frame state. See the frame protocol on the responder and askChildFrames().
   const FRAME_TOKEN = UTILS.generateId('frame'); // One nonce per page session (see registerChildResponder).
@@ -82,7 +89,7 @@
     AA_FILL_RESULT: 'AA_FILL',
     AA_CLEAR_RESULT: 'AA_CLEAR',
   };
-  const EMBEDDED_FORM_SILENT_NOTE = 'An embedded form did not respond; some of its fields may be missing from this review.';
+  const EMBEDDED_FORM_SILENT_NOTE = 'A form inside this page did not answer, so some of its fields may be missing here.';
   // Only the top frame owns the panel, the backend call, and the orchestration;
   // every other frame answers questions about itself. window.top is readable
   // (never callable) across origins; an environment without it is treated as top.
@@ -169,7 +176,7 @@
       console.warn('[AutoApply] Workspace context unavailable:', error);
       // A recorded track that no longer exists must be chosen again; transient
       // failures keep the user's answer and simply retry on the next scan.
-      if (/404|no longer exists/i.test(String(error?.message || ''))) resolvedDuplicate = null;
+      if (error?.status === 404) resolvedDuplicate = null;
     }
     if (opportunity) {
       const nextOpportunityId = workspaceId(opportunity, 'opportunity');
@@ -257,6 +264,76 @@
     if (typeof element.getClientRects === 'function' && element.getClientRects().length === 0) return false;
     const style = typeof getComputedStyle === 'function' ? getComputedStyle(element) : null;
     return !style || (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0');
+  }
+
+  // --- Focus and announcements ------------------------------------------------
+  //
+  // The panel is a modal review: the keyboard stays inside it and the page
+  // behind it is hidden from screen readers while it is open. Both are undone
+  // the moment the panel closes, and whatever the page had before is restored.
+
+  /** The panel's own controls, in tab order. */
+  function panelFocusables() {
+    if (!overlayContainer) return [];
+    return [...overlayContainer.querySelectorAll('button:not([disabled]), a[href], input, select, textarea, summary')]
+      .filter((element) => isRenderedElement(element));
+  }
+
+  /** Wrap Tab and Shift+Tab around the panel instead of letting focus escape. */
+  function trapPanelFocus(event) {
+    if (!overlayContainer) return;
+    const focusable = panelFocusables();
+    const active = (shadowRoot && shadowRoot.activeElement) || document.activeElement;
+    if (!overlayContainer.contains(active)) {
+      event.preventDefault();
+      const target = focusable.length
+        ? (event.shiftKey ? focusable[focusable.length - 1] : focusable[0])
+        : overlayContainer;
+      target.focus({ preventScroll: true });
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && active === first) {
+      event.preventDefault();
+      last.focus({ preventScroll: true });
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus({ preventScroll: true });
+    }
+  }
+
+  /** Hide the employer page from assistive tech while the panel owns the screen. */
+  function setHostPageHidden(hidden) {
+    if (!document.body || hostPageHidden === hidden) return;
+    hostPageHidden = hidden;
+    for (const child of document.body.children) {
+      if (child.nodeType !== 1 || child === shadowHost || child === readyChipHost) continue;
+      if (hidden) {
+        if (!child.hasAttribute('data-autoapply-hidden')) {
+          child.setAttribute('data-autoapply-hidden', child.getAttribute('aria-hidden') || '');
+        }
+        child.setAttribute('aria-hidden', 'true');
+      } else if (child.hasAttribute('data-autoapply-hidden')) {
+        const previous = child.getAttribute('data-autoapply-hidden');
+        child.removeAttribute('data-autoapply-hidden');
+        if (previous) child.setAttribute('aria-hidden', previous);
+        else child.removeAttribute('aria-hidden');
+      }
+    }
+  }
+
+  /**
+   * Say something in the panel's polite live region: loading text, status
+   * banners and Auto-run progress are read out instead of only appearing.
+   * The region is emptied first so a repeated sentence is announced again.
+   */
+  function announce(text) {
+    if (!liveRegionEl) return;
+    liveRegionEl.textContent = '';
+    setTimeout(() => {
+      if (liveRegionEl) liveRegionEl.textContent = String(text || '');
+    }, 30);
   }
 
   /** Human labels for fill attempts that failed, resolved through the scraped field list. */
@@ -595,7 +672,13 @@
     }
   }
 
+  /**
+   * The backend's own explanation of a failure. `apiCall()` carries it as
+   * `error.detail`; an older shape nested the same text in the message body.
+   */
   function apiErrorDetail(error) {
+    const declared = typeof error?.detail === 'string' ? error.detail.trim() : '';
+    if (declared) return declared;
     const raw = String(error?.message || error || '').trim();
     const jsonStart = raw.indexOf('{');
     if (jsonStart !== -1) {
@@ -610,26 +693,45 @@
     return raw;
   }
 
-  async function backendBaseUrl() {
-    try {
-      return await UTILS.getApiBase();
-    } catch (_) {
-      return 'the local backend';
-    }
+  /**
+   * What to tell someone about a failure the backend described in its own
+   * words. The detail is classified, never printed: it can name a provider,
+   * a setting or a status code, none of which belongs in front of a job seeker.
+   */
+  function plainFailureReason(detail) {
+    const text = String(detail || '');
+    if (/api key|not configured|provider|unauthor|invalid key/i.test(text)) return 'Finish setup in AutoApply, then try again.';
+    if (/rate.?limit|quota|too many/i.test(text)) return 'The AI service is busy right now. Try again in a minute.';
+    if (/timeout|timed out|took too long|slow/i.test(text)) return 'The AI service is taking too long. Try again in a minute.';
+    if (/no longer exists|not found/i.test(text)) return 'That saved application is gone. Reload the page and try again.';
+    return 'Please try again.';
   }
 
-  /** Turn a backend failure into actionable copy instead of a raw status code. */
-  async function preparationErrorMessage(error) {
-    const raw = String(error?.message || error || '');
+  /**
+   * Backend prose, said in this product's words. Only wording is rewritten;
+   * identifiers, stored values and URLs are never touched.
+   */
+  function plainPhrase(text) {
+    return String(text || '')
+      .replace(/\bautofill polic(?:y|ies)\b/gi, 'your fill rules')
+      .replace(/\bpolic(?:y|ies)\b/gi, 'fill rules');
+  }
+
+  /**
+   * Turn a failure into actionable copy. `apiCall()` classifies an HTTP
+   * failure on the error itself (`status`, `detail`), so neither a status code
+   * nor the backend's own vocabulary can reach the panel.
+   */
+  function preparationErrorMessage(error) {
     const detail = apiErrorDetail(error);
-    if (raw.includes('404')) return 'Finish profile setup before preparing this application.';
-    if (/failed to fetch|networkerror|load failed/i.test(raw)) {
-      return `Start the local AutoApply backend at ${await backendBaseUrl()}, then try again.`;
+    if (error?.status === 404) return 'Finish setup in AutoApply before preparing this page.';
+    if (/failed to fetch|networkerror|load failed/i.test(String(error?.message || ''))) {
+      return 'Can’t reach AutoApply. Start AutoApply, then try again.';
     }
-    if (/\b(429|502|503)\b/.test(raw) || /provider|api key|not configured|rate.?limit/i.test(detail)) {
-      return `AI suggestions are unavailable: ${detail}`;
+    if ([429, 502, 503].includes(error?.status)) {
+      return 'AI suggestions are off right now. Your saved details still fill in.';
     }
-    return `Could not prepare this application: ${detail}`;
+    return `AutoApply couldn’t prepare this page. ${plainFailureReason(detail)}`;
   }
 
   function policyBlocksAutopilot() {
@@ -650,12 +752,12 @@
             ${versions.map((version) => `<option value="${UTILS.escapeHTML(version.id)}" ${version.id === workspace.selectedResumeVersionId ? 'selected' : ''}>${UTILS.escapeHTML(version.label || version.filename || version.id)}</option>`).join('')}
           </select>
         </label>`
-      : '<div style="font-size:11px;margin-top:6px;">No workspace resume version is available; file fields will stay manual.</div>';
+      : '<div style="font-size:11px;margin-top:6px;">No resume version is saved in AutoApply yet, so file fields stay manual.</div>';
     return `
       <div class="autoapply-workspace-context">
         <div class="autoapply-context-label">Resume for this application</div>
         ${versionSelect}
-        ${policyText ? `<div style="font-size:11px;margin-top:6px;color:#f5c451;">Policy: ${UTILS.escapeHTML(policyText)}</div>` : ''}
+        ${policyText ? `<div style="font-size:11px;margin-top:6px;color:#f5c451;">Fill rules: ${UTILS.escapeHTML(plainPhrase(policyText))}</div>` : ''}
       </div>
     `;
   }
@@ -669,11 +771,11 @@
 
   async function attachSelectedResume(el) {
     if (el.type !== 'file') {
-      return { ok: false, reason: 'This upload control is not a native file input.' };
+      return { ok: false, reason: 'This field does not take a file.' };
     }
     if (!workspace.selectedResumeVersionId) {
       FILLER.highlightUploadField?.(el);
-      return { ok: false, reason: 'Choose a workspace resume version, or select the file manually.' };
+      return { ok: false, reason: 'Choose a saved resume in this panel, or select the file yourself.' };
     }
     try {
       const response = await browser.runtime.sendMessage({
@@ -681,9 +783,9 @@
         version_id: workspace.selectedResumeVersionId,
       });
       if (!response || response.status !== 'success' || !response.file?.base64) {
-        throw new Error(response?.error || 'Resume download failed.');
+        throw new Error('AutoApply could not read that resume file.');
       }
-      if (typeof DataTransfer === 'undefined') throw new Error('This browser does not allow automatic file attachment.');
+      if (typeof DataTransfer === 'undefined') throw new Error('This browser will not let AutoApply attach the file.');
       const file = new File(
         [base64ToBytes(response.file.base64)],
         response.file.filename || 'resume.pdf',
@@ -697,7 +799,7 @@
       return { ok: true };
     } catch (error) {
       FILLER.highlightUploadField?.(el);
-      return { ok: false, reason: `${error.message || 'Automatic attachment failed.'} Select the file manually.` };
+      return { ok: false, reason: `${plainPhrase(error?.message || 'The file could not be attached automatically.')} Select it yourself.` };
     }
   }
 
@@ -757,10 +859,10 @@
   }
 
   async function confirmManualSubmission() {
-    if (!window.confirm('Confirm that you personally clicked the employer’s Submit button. AutoApply will only save a receipt; it will not submit anything.')) return;
+    if (!window.confirm('Confirm that you personally clicked the employer’s Submit button. AutoApply will only save a submission record; it will not submit anything.')) return;
     await saveWorkspacePacket('submitted_by_user');
     if (!workspace.opportunityId || !workspace.packetId) {
-      showStatus('Submission was not recorded because the workspace service is unavailable.', true);
+      showStatus('Submission was not recorded because AutoApply is not reachable.', true);
       return;
     }
     try {
@@ -772,10 +874,10 @@
         user_confirmed: true,
       });
       receiptRecorded = true;
-      showStatus(`Manual submission saved${response?.receipt?.id ? ' with receipt' : ''}.`, false);
+      showStatus(response?.receipt?.id ? 'Submission record saved.' : 'Manual submission saved.', false);
       renderMainUI();
     } catch (error) {
-      showStatus(`Could not save the manual submission receipt: ${error.message}`, true);
+      showStatus(`Could not save the submission record. ${plainFailureReason(error?.detail)}`, true);
     }
   }
 
@@ -845,6 +947,14 @@
       console.warn('[AutoApply] Could not load overlay CSS into shadow root:', err);
     }
 
+    // One polite live region for the whole panel: it sits beside the panel
+    // element so a re-render cannot throw away what is being announced.
+    liveRegionEl = document.createElement('div');
+    liveRegionEl.className = 'autoapply-live-region';
+    liveRegionEl.setAttribute('role', 'status');
+    liveRegionEl.setAttribute('aria-live', 'polite');
+    shadowRoot.appendChild(liveRegionEl);
+
     // Create the overlay container element inside shadow root
     overlayContainer = document.createElement('div');
     overlayContainer.className = 'autoapply-overlay';
@@ -857,6 +967,7 @@
     previousFocus = document.activeElement;
     overlayContainer.focus({ preventScroll: true });
     document.addEventListener('keydown', handleOverlayKeydown, true);
+    setHostPageHidden(true);
 
     showLoading('Scanning this page and preparing your review…');
 
@@ -864,7 +975,7 @@
       await scanPageFields();
     } catch (err) {
       console.error('[AutoApply] Scraper error:', err);
-      showError('Failed to scan page fields. Check console for details.');
+      showError('AutoApply couldn\'t read this page. Reload the page and try again.');
       return;
     }
 
@@ -884,7 +995,7 @@
       await prepareCurrentPage({ url, title, platform });
     } catch (err) {
       console.error('[AutoApply] Backend connection error:', err);
-      showError(await preparationErrorMessage(err));
+      showError(preparationErrorMessage(err));
     }
   }
 
@@ -913,44 +1024,78 @@
     return autofillRes;
   }
 
+  /**
+   * Ask for a match score. It never blocks the fill flow, it is never asked
+   * for twice at once, and it always settles: a slow or failed request leaves
+   * a retry control in the panel instead of a spinner that never stops.
+   */
   async function analyzeFitProgressively() {
+    if (!jdText || jdText.length < 100) return;
+    if (fitAnalysisState === 'pending') return;
+    fitAnalysisState = 'pending';
+    fitAnalysisMessage = '';
+    clearTimeout(fitAnalysisTimer);
+    fitAnalysisTimer = setTimeout(() => {
+      fitAnalysisTimer = null;
+      if (fitAnalysisState !== 'pending') return;
+      fitAnalysisState = 'failed';
+      fitAnalysisMessage = 'AutoApply could not work out a match score for this page.';
+      renderReviewIfOpen();
+    }, FIT_ANALYSIS_TIMEOUT_MS);
+    renderReviewIfOpen();
     try {
       const analysis = await UTILS.apiCall('/api/analyze-job', 'POST', { job_description: jdText });
-      if (analysis?.recommendation === 'unknown' && analysis?.score === 0) return;
-      jobAnalysis = analysis;
-      if (workspace.opportunityId) {
-        await UTILS.workspaceCall(`/opportunities/${encodeURIComponent(workspace.opportunityId)}`, 'PATCH', { fit_score: analysis.score });
+      if (analysis?.recommendation === 'unknown' && analysis?.score === 0) {
+        fitAnalysisState = 'failed';
+        fitAnalysisMessage = 'This posting does not say enough to score the match.';
+      } else {
+        jobAnalysis = analysis;
+        fitAnalysisState = 'ready';
+        if (workspace.opportunityId) {
+          await UTILS.workspaceCall(`/opportunities/${encodeURIComponent(workspace.opportunityId)}`, 'PATCH', { fit_score: analysis.score });
+        }
       }
-      if (overlayContainer && !overlayContainer.querySelector('.autoapply-field-input')) renderMainUI();
     } catch (error) {
       console.warn('[AutoApply] Fit analysis is unavailable:', error);
+      fitAnalysisState = 'failed';
+      fitAnalysisMessage = `AutoApply could not work out a match score. ${plainFailureReason(error?.detail)}`;
+    } finally {
+      clearTimeout(fitAnalysisTimer);
+      fitAnalysisTimer = null;
+      renderReviewIfOpen();
     }
+  }
+
+  /** Re-render the review only when it is the view on screen (never mid-edit). */
+  function renderReviewIfOpen() {
+    if (!overlayContainer || !overlayContainer.querySelector('.autoapply-primary-action-btn')) return;
+    renderMainUI();
   }
 
   function showDuplicateChoice(matches) {
     if (!overlayContainer) return;
     const first = matches[0];
     overlayContainer.innerHTML = `
-      <div class="autoapply-header"><div class="autoapply-logo">${BRAND_MARK}<span>AutoApply</span></div><button class="autoapply-header-btn autoapply-close-btn" title="Close">✕</button></div>
-      <div class="autoapply-duplicate-choice"><p class="autoapply-kicker">Already tracked?</p><h2>${UTILS.escapeHTML(first.company || companyName)} · ${UTILS.escapeHTML(first.role || roleName)}</h2><p>${UTILS.escapeHTML(first.match_reason || 'This looks like an application already in your workspace.')}</p><div class="autoapply-choice-actions"><button class="autoapply-btn autoapply-btn-primary autoapply-reuse-btn">Open tracked application</button><button class="autoapply-btn autoapply-btn-secondary autoapply-new-attempt-btn">Create another attempt</button></div></div>`;
+      <div class="autoapply-header"><div class="autoapply-logo">${BRAND_MARK}<span>AutoApply</span></div><button class="autoapply-header-btn autoapply-close-btn" title="Close" aria-label="Close">✕</button></div>
+      <div class="autoapply-duplicate-choice"><p class="autoapply-kicker">Already saved?</p><h2>${UTILS.escapeHTML(first.company || companyName)} · ${UTILS.escapeHTML(first.role || roleName)}</h2><p>${UTILS.escapeHTML(first.match_reason || 'This looks like an application you already saved in AutoApply.')}</p><div class="autoapply-choice-actions"><button class="autoapply-btn autoapply-btn-primary autoapply-reuse-btn">Open the saved application</button><button class="autoapply-btn autoapply-btn-secondary autoapply-new-attempt-btn">This is a different application</button></div></div>`;
     overlayContainer.querySelector('.autoapply-close-btn').addEventListener('click', dismissOverlay);
     overlayContainer.querySelector('.autoapply-reuse-btn').addEventListener('click', async () => {
-      showLoading('Opening the tracked application…');
+      showLoading('Opening the saved application…');
       try {
         const response = await browser.runtime.sendMessage({ type:'OPEN_WORKSPACE_RECORD', opportunity_id:first.id });
-        if (response?.status !== 'success') throw new Error(response?.error || 'Could not open the workspace record.');
+        if (response?.status !== 'success') throw new Error('Could not open that saved application.');
         // This flow now belongs to the tracked record; a later step must not ask again.
         workspace.opportunityId = first.id;
         workspace.packetId = null;
         resolvedDuplicate = { url: window.location.href, resolution: 'reuse', existingId: first.id };
         dismissOverlay();
       }
-      catch (error) { showError(error.message); }
+      catch (error) { showError(plainPhrase(error?.message) || 'AutoApply could not open that application. Try again.'); }
     });
     overlayContainer.querySelector('.autoapply-new-attempt-btn').addEventListener('click', async () => {
-      showLoading('Preparing another attempt…');
+      showLoading('Preparing a new application…');
       try { await loadWorkspaceContext({ duplicateResolution:'create_new' }); await prepareCurrentPage(); }
-      catch (error) { showError(error.message); }
+      catch (error) { showError(plainPhrase(error?.message) || 'AutoApply could not prepare this page. Try again.'); }
     });
   }
 
@@ -974,24 +1119,56 @@
             jobAnalysis = analysis;
             await UTILS.workspaceCall(`/opportunities/${encodeURIComponent(workspace.opportunityId)}`, 'PATCH', { fit_score:analysis.score });
           }
-        } catch (_) { /* Fit is intentionally non-blocking. */ }
+        } catch (error) {
+          // Fit is intentionally non-blocking here; the popup reports the rest.
+          console.warn('[AutoApply] Fit analysis is unavailable:', error);
+        }
       }
       return { ok:true, status:'ready', opportunity_id:workspace.opportunityId, reused:Boolean(context?.opportunity?.reused), title:`${roleName} · ${companyName}`, fit_score:jobAnalysis?.score, ready_count:result.ready_count, review_count:result.review_count };
     } catch (error) {
-      return { ok:false, error:error.message || 'Preparation failed' };
+      return { ok:false, error:error?.message || 'AutoApply could not prepare this page.' };
     }
   }
 
+  /**
+   * Visible, fillable controls on the employer page. The filler's own
+   * visibility predicate is used because `offsetParent` is null for a
+   * fixed-position control; site chrome — a search box, a newsletter form —
+   * is not an application field.
+   */
+  function visibleFillableControls() {
+    return [...document.querySelectorAll('input:not([type="hidden"]), select, textarea')].filter((element) => {
+      if (element.type === 'search') return false;
+      if (element.disabled || !FILLER.isRenderedControl(element)) return false;
+      return !element.closest('nav, header, footer, [role="search"]');
+    });
+  }
+
+  /** A rendered form box big enough to hold an application, outside site chrome. */
+  function hasPlausibleFormContainer() {
+    return [...document.querySelectorAll('form, [role="form"]')].some((form) => {
+      if (form.closest('nav, header, footer, [role="search"]')) return false;
+      if (!isPlausibleFormBox(form)) return false;
+      return Boolean(form.querySelector('input:not([type="hidden"]), select, textarea'));
+    });
+  }
+
+  /**
+   * Is this page an application to prepare? The known job boards are the fast
+   * path, but plenty of employers host their own forms, so a page with two
+   * fillable controls — or a real form container — qualifies on its own.
+   */
   function looksLikeApplicationPage() {
     if (!/^https?:/i.test(window.location.href)) return false;
     const identity = `${window.location.href} ${document.title}`.toLowerCase();
     const knownPage = /(workdayjobs|greenhouse|lever\.co|ashbyhq|icims|smartrecruiters|taleo|oraclecloud|darwinbox|keka|\/apply(?:\/|\?|$)|application)/.test(identity);
-    if (!knownPage) return false;
-    // The filler's own visibility predicate: offsetParent is null for a
-    // fixed-position control, which would hide a real form from this gate.
-    const visibleFields = [...document.querySelectorAll('input:not([type="hidden"]),select,textarea')]
-      .filter((element) => !element.disabled && FILLER.isRenderedControl(element)).length;
-    if (visibleFields >= 2) return true;
+    const visibleFields = visibleFillableControls();
+    // Fast path: a known board that already has a real form on it.
+    if (knownPage && visibleFields.length >= 2) return true;
+    // Generic fallback: two fillable controls are an application, whatever the
+    // address says. A single search box never reaches this branch.
+    if (visibleFields.length >= 2) return true;
+    if (hasPlausibleFormContainer()) return true;
     // A form rendered entirely inside an iframe (SmartRecruiters one-click
     // apply) leaves this document with no fields of its own.
     return [...document.querySelectorAll('iframe, frame')].some(isPlausibleFormBox);
@@ -1086,6 +1263,8 @@
       shadowRoot = null;
       overlayContainer = null;
     }
+    liveRegionEl = null;
+    setHostPageHidden(false);
     if (focusWasInside && previousFocus?.isConnected && typeof previousFocus.focus === 'function') {
       previousFocus.focus({ preventScroll: true });
     }
@@ -1110,10 +1289,19 @@
     removeOverlay();
   }
 
-  /** Escape closes the panel, except while the field editor owns the key. */
+  /** Escape closes the panel — except at the field editor — and Tab stays inside it. */
   function handleOverlayKeydown(event) {
-    if (event.key !== 'Escape' || !overlayContainer) return;
+    if (!overlayContainer) return;
+    if (event.key === 'Tab') {
+      trapPanelFocus(event);
+      return;
+    }
+    if (event.key !== 'Escape') return;
     if (overlayContainer.querySelector('.autoapply-field-input')) return;
+    if (overlayContainer.querySelector('.autoapply-autorun-confirm')) {
+      cancelAutoRun();
+      return;
+    }
     dismissOverlay();
   }
 
@@ -1129,7 +1317,7 @@
           <span>AutoApply</span>
         </div>
         <div class="autoapply-header-actions">
-          <button class="autoapply-header-btn autoapply-close-btn" title="Close">✕</button>
+          <button class="autoapply-header-btn autoapply-close-btn" title="Close" aria-label="Close">✕</button>
         </div>
       </div>
       <div class="autoapply-loading">
@@ -1139,6 +1327,7 @@
     `;
 
     overlayContainer.querySelector('.autoapply-close-btn').addEventListener('click', dismissOverlay);
+    announce(text);
   }
 
   /**
@@ -1153,7 +1342,7 @@
           <span>AutoApply</span>
         </div>
         <div class="autoapply-header-actions">
-          <button class="autoapply-header-btn autoapply-close-btn" title="Close">✕</button>
+          <button class="autoapply-header-btn autoapply-close-btn" title="Close" aria-label="Close">✕</button>
         </div>
       </div>
       <div class="autoapply-error">
@@ -1162,6 +1351,7 @@
     `;
 
     overlayContainer.querySelector('.autoapply-close-btn').addEventListener('click', dismissOverlay);
+    announce(msg);
   }
 
   /**
@@ -1187,15 +1377,15 @@
           <span>AutoApply</span>
         </div>
         <div class="autoapply-header-actions">
-          <button class="autoapply-header-btn autoapply-minimize-btn" title="Minimize">─</button>
-          <button class="autoapply-header-btn autoapply-close-btn" title="Close">✕</button>
+          <button class="autoapply-header-btn autoapply-minimize-btn" title="Minimize" aria-label="Minimize">─</button>
+          <button class="autoapply-header-btn autoapply-close-btn" title="Close" aria-label="Close">✕</button>
         </div>
       </div>
 
       <div class="autoapply-opportunity-heading">
         <p class="autoapply-kicker">Preparing now</p>
         <h2>${UTILS.escapeHTML(companyName || 'Company')} · ${UTILS.escapeHTML(roleName || 'Role')}</h2>
-        <div class="autoapply-prep-summary"><span>${preparationSummary.ready_count} ready</span><span>${preparationSummary.review_count} review</span><span>${preparationSummary.skipped_count} skipped</span></div>
+        <div class="autoapply-prep-summary"><span>${UTILS.escapeHTML(String(preparationSummary.ready_count))} ready</span><span>${UTILS.escapeHTML(String(preparationSummary.review_count))} to review</span><span>${UTILS.escapeHTML(String(preparationSummary.skipped_count))} skipped</span></div>
       </div>
       ${renderDuplicateWarning(cachedDuplicateRes)}
       ${renderAiWarning()}
@@ -1210,7 +1400,7 @@
         <details class="autoapply-more-actions"><summary aria-label="More actions">•••</summary><div class="autoapply-action-menu">
           <button type="button" class="autoapply-fill-only-btn">Fill without continuing</button>
           ${lastFillSnapshot.length || lastFillIncludedFrames ? '<button type="button" class="autoapply-undo-btn">Undo last fill</button>' : ''}
-          <button type="button" class="autoapply-autopilot-btn" ${policyBlocksAutopilot() ? 'disabled title="Blocked by workspace policy"' : ''}>Continue automatically</button>
+          <button type="button" class="autoapply-autopilot-btn" ${policyBlocksAutopilot() ? 'disabled title="Blocked by your fill rules"' : ''}>Fill and continue automatically</button>
         </div></details>
       </div>
     `;
@@ -1222,21 +1412,9 @@
     // Enable drag
     setupDrag();
 
-    // Analyze button event
+    // Match-score retry: this control is only rendered when a score is missing.
     const analyzeBtn = overlayContainer.querySelector('.autoapply-analyze-btn');
-    if (analyzeBtn) {
-      analyzeBtn.addEventListener('click', async () => {
-        analyzeBtn.textContent = 'Analyzing...';
-        analyzeBtn.disabled = true;
-        try {
-          jobAnalysis = await UTILS.apiCall('/api/analyze-job', 'POST', { job_description: jdText });
-          renderMainUI();
-        } catch (err) {
-          analyzeBtn.textContent = 'Failed';
-          console.error('[AutoApply] Analyze Job failed:', err);
-        }
-      });
-    }
+    if (analyzeBtn) analyzeBtn.addEventListener('click', () => analyzeFitProgressively());
 
     // Edit button events
     overlayContainer.querySelectorAll('.autoapply-edit-btn').forEach(btn => {
@@ -1254,6 +1432,7 @@
         if (!valDiv) return;
         const isExpanded = valDiv.classList.toggle('expanded');
         e.currentTarget.textContent = isExpanded ? '▲ less' : '▼ more';
+        e.currentTarget.setAttribute('aria-expanded', String(isExpanded));
       });
     });
 
@@ -1262,7 +1441,7 @@
       else handleFill(!pageState.isLast);
     });
     overlayContainer.querySelector('.autoapply-fill-only-btn')?.addEventListener('click', () => handleFill(false));
-    overlayContainer.querySelector('.autoapply-autopilot-btn')?.addEventListener('click', runAutoPilot);
+    overlayContainer.querySelector('.autoapply-autopilot-btn')?.addEventListener('click', requestAutoRun);
     overlayContainer.querySelector('.autoapply-undo-btn')?.addEventListener('click', undoLastFill);
 
     const resumeVersion = overlayContainer.querySelector('.autoapply-resume-version');
@@ -1284,6 +1463,9 @@
         await generateCoverLetter(idx, e.currentTarget);
       });
     });
+
+    // A re-render during a fill must not hand the controls back to the user.
+    updateFillControls();
   }
 
   const CONFIRMATION_PATTERN = /(application (?:has been )?(?:submitted|received)|thank you for applying|we received your application)/i;
@@ -1304,18 +1486,14 @@
 
   /** Visible application fields that are not site chrome (search, nav, header, footer). */
   function hasFillableApplicationFields() {
-    return [...document.querySelectorAll('input:not([type="hidden"]), select, textarea')].some((element) => {
-      if (element.type === 'search') return false;
-      if (element.disabled || !FILLER.isRenderedControl(element)) return false;
-      return !element.closest('nav, header, footer, [role="search"]');
-    });
+    return visibleFillableControls().length > 0;
   }
 
   function renderAiWarning() {
     if (!aiWarning) return '';
     return `
       <div class="autoapply-ai-warning" role="status" style="margin-top:8px;padding:8px;border-radius:6px;border:1px solid #f5c451;background:rgba(245,196,81,.12);font-size:11px;color:#f5c451;">
-        AI suggestions are unavailable: ${UTILS.escapeHTML(aiWarning)} Profile fields still fill from your saved data; review anything missing before submitting.
+        AI suggestions are off right now. Your saved details still fill in. Check anything missing before you submit.
       </div>
     `;
   }
@@ -1379,7 +1557,7 @@
       // still here, one expansion away.
       groups.push(`
         <details class="autoapply-field-group autoapply-field-group-collapsed">
-          <summary><span><strong>${collapsed.length} field${collapsed.length === 1 ? '' : 's'} left for you</strong><small>Sensitive or policy-skipped — expand for each reason</small></span><b>${collapsed.length}</b></summary>
+          <summary><span><strong>${collapsed.length} field${collapsed.length === 1 ? '' : 's'} left for you</strong><small>Sensitive or covered by your fill rules — open for each reason</small></span><b>${collapsed.length}</b></summary>
           <div>${collapsed.map((entry) => renderFieldRow(entry.field, entry.idx)).join('')}</div>
         </details>
       `);
@@ -1465,16 +1643,32 @@
     document.addEventListener('mouseup', dragUpHandler);
   }
 
+  /** Plain wording for where a saved application stands. */
+  const STATUS_LABELS = {
+    saved: 'Saved',
+    preparing: 'Being prepared',
+    ready_to_review: 'Ready to check',
+    submitted: 'Submitted',
+    closed: 'Closed',
+    archived: 'Archived',
+  };
+
+  function statusLabel(status) {
+    const key = String(status || '').toLowerCase().trim();
+    if (!key) return 'Saved';
+    return STATUS_LABELS[key] || key.replace(/_/g, ' ');
+  }
+
   /**
    * Helper to format the duplicate warning panel if duplicate found.
    */
   function renderDuplicateWarning(duplicateRes) {
     if (duplicateRes && duplicateRes.is_duplicate) {
       const existing = duplicateRes.existing;
-      let info = 'Already applied to this company/role!';
+      let info = 'This looks like an application you already saved in AutoApply.';
       if (existing && existing.applied_at) {
         const date = new Date(existing.applied_at).toLocaleDateString();
-        info = `Warning: Already applied to this role on ${date} (Status: ${existing.status})`;
+        info = `You already applied to this role on ${date}. Status: ${statusLabel(existing.status)}.`;
       }
       return `
         <div class="autoapply-duplicate-warning">
@@ -1490,16 +1684,28 @@
    * Helper to format the fit score analysis section.
    */
   function renderFitScoreSection() {
+    // Nothing to score: the panel stays quiet rather than offering a control
+    // that could not do anything.
+    if (!jdText || jdText.length < 100) return '';
     if (!jobAnalysis) {
-      if (!jdText) return '';
+      if (fitAnalysisState === 'pending') {
+        return `
+          <div class="autoapply-fit-section autoapply-fit-loading">
+            <span class="autoapply-fit-pulse"></span><span>Checking your match score…</span>
+          </div>
+        `;
+      }
+      // Failed, or never asked for: the panel offers the retry instead of a
+      // spinner that never resolves.
       return `
         <div class="autoapply-fit-section autoapply-fit-loading">
-          <span class="autoapply-fit-pulse"></span><span>Fit analysis is loading in the background…</span>
+          <span>${UTILS.escapeHTML(fitAnalysisMessage || 'No match score for this page yet.')}</span>
+          <button type="button" class="autoapply-btn autoapply-analyze-btn autoapply-fit-retry">Check match score</button>
         </div>
       `;
     }
 
-    const score = jobAnalysis.score ?? 0;
+    const score = UTILS.escapeHTML(String(jobAnalysis.score ?? 0));
     const verdict = jobAnalysis.verdict || 'No verdict';
     const matched = jobAnalysis.matched_skills || [];
     const missing = jobAnalysis.missing_skills || [];
@@ -1507,7 +1713,7 @@
     return `
       <div class="autoapply-fit-section">
         <div class="autoapply-fit-header">
-          <div class="autoapply-fit-score">${score}/100</div>
+          <div class="autoapply-fit-score" aria-label="Match score ${score} out of 100">${score} out of 100</div>
           <div class="autoapply-fit-verdict">
             <strong>${UTILS.escapeHTML(jobAnalysis.recommendation?.toUpperCase() || 'APPLY')}</strong> — ${UTILS.escapeHTML(verdict)}
           </div>
@@ -1518,6 +1724,46 @@
         </div>
       </div>
     `;
+  }
+
+  /**
+   * How sure AutoApply is about an answer, in the panel's own words. The key
+   * also picks the dot's class, so only a known word ever reaches the markup.
+   */
+  const CONFIDENCE_COPY = {
+    high: "We're confident",
+    medium: 'Please check',
+    low: 'Please check',
+    skip: 'Not sure',
+  };
+
+  function confidenceKey(value) {
+    const key = String(value || '').toLowerCase();
+    return CONFIDENCE_COPY[key] ? key : 'medium';
+  }
+
+  /**
+   * Plain wording for why AutoApply left a field alone. The backend writes
+   * these in the panel's vocabulary; the ones we know are said in plain words,
+   * and anything else is shown as written (escaped) rather than hidden.
+   */
+  const FIELD_REASON_COPY = [
+    [/skipped by the mapping/i, 'No matching answer for this field.'],
+    [/review this sensitive field/i, 'Please answer this sensitive question yourself.'],
+    [/autofill policy says never fill/i, 'Your fill rules say to leave this one to you.'],
+    [/autofill policy requires review/i, 'Your fill rules say to check this one yourself.'],
+    [/asks for someone else's contact details/i, "This asks for someone else's contact details."],
+    [/asks about someone else's website or profile/i, "This asks about someone else's website or profile."],
+    [/^add a github url/i, 'Add your GitHub link in AutoApply.'],
+    [/^add a portfolio url/i, 'Add your portfolio link in AutoApply.'],
+    [/cannot determine value/i, 'AutoApply has no saved answer for this question.'],
+  ];
+
+  function plainFieldReason(reason) {
+    const text = String(reason || '').trim();
+    if (!text) return 'No matching answer for this field.';
+    for (const [pattern, copy] of FIELD_REASON_COPY) if (pattern.test(text)) return copy;
+    return plainPhrase(text);
   }
 
   /**
@@ -1533,15 +1779,17 @@
 
     let displayValue = inst.value || '';
     if (inst.action === 'skip') {
-      displayValue = inst.reason || 'Skipped';
+      displayValue = plainFieldReason(inst.reason);
     } else if (field.type === 'password') {
       displayValue = '••••••••';
     }
 
-    const dotClass = `autoapply-confidence-dot ${inst.confidence || 'medium'}`;
+    const confidence = confidenceKey(inst.confidence);
+    const confidenceCopy = CONFIDENCE_COPY[confidence];
+    const dotClass = `autoapply-confidence-dot ${confidence}`;
     const isExpandable = displayValue.length > 100 && inst.action !== 'skip';
     const valClass = `autoapply-field-value ${inst.action === 'skip' ? 'skip' : ''}${isExpandable ? ' expandable' : ''}`;
-    const toggleHtml = isExpandable ? `<button class="autoapply-expand-toggle" data-idx="${idx}">▼ more</button>` : '';
+    const toggleHtml = isExpandable ? `<button class="autoapply-expand-toggle" data-idx="${idx}" aria-expanded="false" aria-controls="val_${idx}">▼ more</button>` : '';
 
     const labelLower = (field.label || field.placeholder || field.name || '').toLowerCase();
     const isCoverLetter = (field.type === 'textarea' || field.type === 'text') && (
@@ -1564,21 +1812,21 @@
       <div style="margin-top:6px;font-size:11px;color:#fca5a5;">Could not fill: ${UTILS.escapeHTML(failure.reason)}</div>
     ` : '';
     const recoveryHtml = failure && !field.frameTag ? `
-      <button class="autoapply-recover-btn" data-idx="${idx}" style="margin-top:4px;font-size:11px;">Edit &amp; teach recovery</button>
+      <button class="autoapply-recover-btn" data-idx="${idx}" style="margin-top:4px;font-size:11px;">Edit this answer</button>
     ` : '';
     const editHtml = field.frameTag
       ? '<span class="autoapply-edit-note" style="flex-shrink:0;margin-top:2px;font-size:10px;color:#8b93a7;white-space:nowrap;">edit on the page</span>'
-      : `<button class="autoapply-edit-btn" data-idx="${idx}" title="Edit Value">✎</button>`;
+      : `<button class="autoapply-edit-btn" data-idx="${idx}" title="Edit this answer" aria-label="Edit this answer">✎</button>`;
     const source = inst.source || (inst.action === 'skip' ? 'policy' : 'ai');
-    const sourceLabel = source.startsWith('profile') ? 'Verified profile' : source.startsWith('answer_vault') ? 'Approved answer' : source.startsWith('resume') ? 'Resume file' : source.startsWith('learned') ? 'Learned correction' : source.startsWith('policy') ? 'Review policy' : 'AI suggestion';
+    const sourceLabel = source.startsWith('profile') ? 'Verified profile' : source.startsWith('answer_vault') ? 'Saved answer' : source.startsWith('resume') ? 'Resume file' : source.startsWith('learned') ? 'Corrected by you' : source.startsWith('policy') ? 'Fill rules' : 'AI suggestion';
 
     return `
       <div class="autoapply-field-row" id="row_${idx}">
-        <div class="${dotClass}" title="Confidence: ${inst.confidence || 'unknown'}"></div>
+        <div class="${dotClass}" title="${UTILS.escapeHTML(confidenceCopy)}"></div>
         <div class="autoapply-field-info">
           <div class="autoapply-field-label">${UTILS.escapeHTML(field.label || field.placeholder || field.name || 'Unnamed Field')} ${field.required ? '<span style="color:#c84545">*</span>' : ''}</div>
           <div class="${valClass}" id="val_${idx}">${UTILS.escapeHTML(displayValue)}</div>
-          <div class="autoapply-field-source">${UTILS.escapeHTML(sourceLabel)} · ${UTILS.escapeHTML(inst.confidence || 'unknown')} confidence</div>
+          <div class="autoapply-field-source">${UTILS.escapeHTML(sourceLabel)} · ${UTILS.escapeHTML(confidenceCopy)}</div>
           ${toggleHtml}
           ${coverLetterBtnHtml}
           ${failureHtml}
@@ -1599,7 +1847,7 @@
     if (!field) return;
     if (field.frameTag) {
       // The element lives in another document; only the page can edit it.
-      showStatus('This field is inside an embedded form. Edit it on the page itself.', true);
+      showStatus('This field is part of a form inside this page. Edit it on the page itself.', true);
       return;
     }
     const row = overlayContainer.querySelector(`#row_${idx}`);
@@ -1614,11 +1862,15 @@
       confidence: 'medium'
     };
 
+    // The row's label is a plain div, so each control carries the same words
+    // as its own accessible name.
+    const controlLabel = field.label || field.placeholder || field.name || 'Unnamed Field';
+
     let inputHtml = '';
 
     if (field.type === 'select' && field.options && field.options.length > 0) {
       inputHtml = `
-        <select class="autoapply-field-input" id="input_${idx}">
+        <select class="autoapply-field-input" id="input_${idx}" aria-label="${UTILS.escapeHTML(controlLabel)}">
           <option value="">-- Select Option --</option>
           ${field.options.map(opt => `
             <option value="${UTILS.escapeHTML(opt)}" ${opt.toLowerCase().trim() === (inst.value || '').toLowerCase().trim() ? 'selected' : ''}>
@@ -1629,11 +1881,11 @@
       `;
     } else if (field.type === 'textarea' || (inst.value && inst.value.length > 40)) {
       inputHtml = `
-        <textarea class="autoapply-field-input" id="input_${idx}" rows="3">${UTILS.escapeHTML(inst.value || '')}</textarea>
+        <textarea class="autoapply-field-input" id="input_${idx}" rows="3" aria-label="${UTILS.escapeHTML(controlLabel)}">${UTILS.escapeHTML(inst.value || '')}</textarea>
       `;
     } else {
       inputHtml = `
-        <input type="text" class="autoapply-field-input" id="input_${idx}" value="${UTILS.escapeHTML(inst.value || '')}">
+        <input type="text" class="autoapply-field-input" id="input_${idx}" aria-label="${UTILS.escapeHTML(controlLabel)}" value="${UTILS.escapeHTML(inst.value || '')}">
       `;
     }
 
@@ -1648,7 +1900,7 @@
     valDiv.innerHTML = `
       <div style="display: flex; gap: 4px; margin-top: 4px;">
         ${inputHtml}
-        <button class="autoapply-header-btn autoapply-save-btn" data-idx="${idx}" style="align-self: flex-start; padding: 6px 10px;">✓</button>
+        <button class="autoapply-header-btn autoapply-save-btn" data-idx="${idx}" title="Save this answer" aria-label="Save this answer" style="align-self: flex-start; padding: 6px 10px;">✓</button>
       </div>
     `;
 
@@ -1767,11 +2019,76 @@
   }
 
   /**
+   * Ask before an unattended run. The loop fills page after page and moves on
+   * by itself, so the user confirms that in the panel — never in a browser
+   * dialog, which can neither explain the run nor be styled or dismissed here.
+   */
+  function requestAutoRun() {
+    if (policyBlocksAutopilot()) {
+      showStatus(`Auto-run is blocked by your fill rules. ${plainPhrase(policyMessage())}`.trim(), true);
+      return;
+    }
+    renderAutoRunConfirm();
+  }
+
+  /** The confirmation view. Escape, the ✕ and "Not now" all leave it. */
+  function renderAutoRunConfirm() {
+    if (!overlayContainer) return;
+    autopilotState = 'starting';
+    autopilotMessage = '';
+    overlayContainer.className = 'autoapply-overlay';
+    overlayContainer.innerHTML = `
+      <div class="autoapply-header">
+        <div class="autoapply-logo">
+          ${BRAND_MARK}
+          <span>AutoApply</span>
+        </div>
+        <div class="autoapply-header-actions">
+          <button class="autoapply-header-btn autoapply-close-btn" title="Close" aria-label="Close">✕</button>
+        </div>
+      </div>
+      <div class="autoapply-autorun-confirm">
+        <p class="autoapply-kicker">Fill and continue automatically</p>
+        <h2>Fill every page without stopping to ask?</h2>
+        <p>AutoApply fills this page, then moves to the next one on its own.</p>
+        <p>It stops as soon as a question needs you, and AutoApply never clicks the final Submit button.</p>
+        <div class="autoapply-choice-actions">
+          <button class="autoapply-btn autoapply-btn-primary autoapply-autorun-start-btn">Start filling</button>
+          <button class="autoapply-btn autoapply-btn-secondary autoapply-autorun-cancel-btn">Not now</button>
+        </div>
+      </div>
+    `;
+    overlayContainer.querySelector('.autoapply-close-btn').addEventListener('click', cancelAutoRun);
+    overlayContainer.querySelector('.autoapply-autorun-start-btn').addEventListener('click', beginAutoRun);
+    overlayContainer.querySelector('.autoapply-autorun-cancel-btn').addEventListener('click', cancelAutoRun);
+    overlayContainer.querySelector('.autoapply-autorun-start-btn').focus({ preventScroll: true });
+    announce('Fill every page automatically? AutoApply fills each page and moves on by itself. It never clicks the final Submit button.');
+  }
+
+  /** The user confirmed: hand the page over to the loop. */
+  function beginAutoRun() {
+    const startBtn = overlayContainer?.querySelector('.autoapply-autorun-start-btn');
+    if (startBtn) {
+      startBtn.setAttribute('disabled', '');
+      startBtn.textContent = 'Starting…';
+    }
+    runAutoPilot();
+  }
+
+  /** "Not now": nothing was started and nothing on the page was touched. */
+  function cancelAutoRun() {
+    autopilotState = 'idle';
+    autopilotMessage = '';
+    renderMainUI();
+    showStatus('Auto-run was not started. Nothing was submitted.', false);
+  }
+
+  /**
    * Run the AutoPilot loop: scrape, get backend instructions, fill, advance, detect page change, and repeat.
    */
   async function runAutoPilot() {
     if (policyBlocksAutopilot()) {
-      showStatus(`AutoPilot is blocked by policy. ${policyMessage()}`.trim(), true);
+      showStatus(`Auto-run is blocked by your fill rules. ${plainPhrase(policyMessage())}`.trim(), true);
       return;
     }
     autopilotActive = true;
@@ -1786,17 +2103,18 @@
       autopilotStep++;
       
       if (autopilotStep > MAX_AUTOPILOT_STEPS) {
-        stopAutoPilot('Stopped: exceeded maximum steps (possible loop)', 'failed');
+        stopAutoPilot(`Stopped after ${MAX_AUTOPILOT_STEPS} pages in a row. Nothing was submitted.`, 'failed');
         return;
       }
       
-      showAutoPilotStatus(`Filling page ${autopilotStep}...`);
+      showAutoPilotStatus(`Filling page ${autopilotStep}…`);
       
       // 1. Scrape the current page and its embedded frames
       try {
         await scanPageFields();
       } catch (err) {
-        stopAutoPilot(`Scraper error: ${err.message}`, 'failed');
+        console.error('[AutoApply] AutoPilot scraper error:', err);
+        stopAutoPilot('AutoApply couldn\'t read this page. Reload the page and try again.', 'failed');
         return;
       }
 
@@ -1812,7 +2130,7 @@
         const blockingText = blocking.length
           ? `Still required: ${blocking.slice(0, 5).join(', ')}.`
           : 'Check the fields the site marked as required.';
-        const message = `Stopped: this page did not advance after ${MAX_SAME_PAGE_FILLS} fill attempts. ${blockingText} Nothing was submitted.`;
+        const message = `This page did not move on after ${MAX_SAME_PAGE_FILLS} tries. ${blockingText} Nothing was submitted.`;
         stopAutoPilot(message, 'failed');
         renderMainUI();
         showStatus(message, true);
@@ -1825,7 +2143,7 @@
         await new Promise(r => setTimeout(r, 1000));
         const lastCheck = FILLER.isLastPage();
         if (lastCheck.isLast) {
-          stopAutoPilot('AutoPilot complete. Review and submit manually.', 'ready_to_review');
+          stopAutoPilot('Auto-run finished. Check the form on the employer site, then submit it yourself.', 'ready_to_review');
           logApplicationToHistory();
           return;
         }
@@ -1852,7 +2170,8 @@
         currentInstructions = autofillRes.instructions || [];
         aiWarning = autofillRes.ai_error || '';
       } catch (err) {
-        stopAutoPilot(`Backend error: ${err.message}`, 'failed');
+        console.error('[AutoApply] AutoPilot autofill request failed:', err);
+        stopAutoPilot('Can\'t reach AutoApply, so Auto-run stopped. Nothing was submitted.', 'failed');
         return;
       }
       
@@ -1862,11 +2181,11 @@
       const result = await fillCurrentInstructions('autopilot_filled');
       const optionalFailures = failedFieldLabels(result.failures.filter((failure) => !pageFields.find((field) => field.id === failure.field_id)?.required));
       showAutoPilotStatus(
-        `Page ${autopilotStep}: Filled ${result.filled}, skipped ${result.skipped}, failed ${result.failed}`
+        `Page ${autopilotStep}: ${result.filled} filled, ${result.skipped} skipped, ${result.failed} left for you.`
       );
       const blocking = blockingRequiredFields();
       if (blocking.length) {
-        const message = `Stopped for field recovery. Still required: ${blocking.slice(0, 5).join(', ')}. Nothing was submitted.`;
+        const message = `Stopped so you can finish these fields: ${blocking.slice(0, 5).join(', ')}. Nothing was submitted.`;
         stopAutoPilot(message, 'failed');
         renderMainUI();
         showStatus(message, true);
@@ -1884,7 +2203,8 @@
       if (lastPageInfo.isLast) {
         autopilotActive = false;
         autopilotState = 'ready_to_review';
-        autopilotMessage = `AutoPilot complete (${lastPageInfo.reason}). Review and submit manually.`;
+        console.log(`[AutoApply] AutoPilot stopped on the last page: ${lastPageInfo.reason}`);
+        autopilotMessage = 'Auto-run finished at the end of the form. Check every answer, then submit it yourself.';
         showAutoPilotStatus(autopilotMessage);
         logApplicationToHistory();
         // Re-render the full UI so user can review final page
@@ -1895,11 +2215,11 @@
       // 6. Click next and wait for page change
       const clicked = FILLER.clickNextButton();
       if (!clicked) {
-        stopAutoPilot('Could not find a safe Next/Continue button.', 'failed');
+        stopAutoPilot('No Next or Continue button on this page, so Auto-run stopped. Nothing was submitted.', 'failed');
         return;
       }
       
-      showAutoPilotStatus(`Advancing to page ${autopilotStep + 1}...${optionalFailures.length ? ` Optional fields left for you: ${optionalFailures.join(', ')}.` : ''}`);
+      showAutoPilotStatus(`Moving to page ${autopilotStep + 1}…${optionalFailures.length ? ` Still yours to fill: ${optionalFailures.join(', ')}.` : ''}`);
       
       // 7. Wait for a real step change (bounded; a slow page is caught by the loop guard above)
       advanced = await waitForPageChange(AUTOPILOT_PAGE_CHANGE_TIMEOUT_MS);
@@ -1934,7 +2254,7 @@
           <span>AutoApply</span>
         </div>
         <div class="autoapply-header-actions">
-          <button class="autoapply-header-btn autoapply-close-btn" title="Close">✕</button>
+          <button class="autoapply-header-btn autoapply-close-btn" title="Close" aria-label="Close">✕</button>
         </div>
       </div>
       <div class="autoapply-autopilot-status">
@@ -1943,7 +2263,7 @@
       </div>
       ${autopilotActive ? `
         <div class="autoapply-footer">
-          <button class="autoapply-btn autoapply-stop-btn">Stop AutoPilot</button>
+          <button class="autoapply-btn autoapply-stop-btn">Stop Auto-run</button>
         </div>
       ` : `
         <div class="autoapply-footer">
@@ -1951,13 +2271,14 @@
         </div>
       `}
     `;
+    announce(text);
     
     const closeBtn = overlayContainer.querySelector('.autoapply-close-btn');
     if (closeBtn) closeBtn.addEventListener('click', () => { stopAutoPilot(); dismissOverlay(); });
     
     const stopBtn = overlayContainer.querySelector('.autoapply-stop-btn');
     if (stopBtn) stopBtn.addEventListener('click', () => {
-      stopAutoPilot('AutoPilot stopped by user.');
+      stopAutoPilot('Auto-run stopped. Nothing was submitted.');
       renderMainUI();
     });
     
@@ -1969,7 +2290,7 @@
   function logApplicationToHistory() {
     saveWorkspacePacket('ready_to_review').then((packet) => {
       if (packet) showStatus('Saved for review. AutoApply did not submit anything.', false);
-      else showStatus('Nothing was submitted, but the workspace record could not be saved.', true);
+      else showStatus('Nothing was submitted, but AutoApply could not save this to your applications.', true);
     });
   }
 
@@ -2007,8 +2328,53 @@
     } catch (err) {
       btn.textContent = originalText;
       btn.disabled = false;
-      showStatus(`Cover letter failed: ${err.message}`, true);
+      showStatus(`AutoApply could not write the cover letter. ${plainFailureReason(err?.detail)}`, true);
     }
+  }
+
+  /**
+   * Mark a fill as running (or finished) and mirror that onto the controls: the
+   * primary button and every ••• action are unavailable until it settles, and
+   * the button says what is happening.
+   */
+  function setFillInFlight(value) {
+    fillInFlight = value;
+    updateFillControls();
+  }
+
+  /** Reflect the in-flight state onto whatever the panel is showing right now. */
+  function updateFillControls() {
+    if (!overlayContainer) return;
+    const primary = overlayContainer.querySelector('.autoapply-primary-action-btn');
+    if (primary) {
+      if (fillInFlight) {
+        if (!primary.hasAttribute('data-autoapply-idle-label')) {
+          // Remember what the button said, and whether the page had already
+          // disabled it, so the state is restored rather than guessed.
+          primary.setAttribute('data-autoapply-idle-label', primary.textContent);
+          primary.setAttribute('data-autoapply-was-disabled', primary.hasAttribute('disabled') ? '1' : '0');
+        }
+        primary.textContent = 'Filling…';
+        primary.setAttribute('disabled', '');
+      } else if (primary.hasAttribute('data-autoapply-idle-label')) {
+        primary.textContent = primary.getAttribute('data-autoapply-idle-label');
+        if (primary.getAttribute('data-autoapply-was-disabled') === '1') primary.setAttribute('disabled', '');
+        else primary.removeAttribute('disabled');
+        primary.removeAttribute('data-autoapply-idle-label');
+        primary.removeAttribute('data-autoapply-was-disabled');
+      }
+    }
+    overlayContainer.querySelectorAll('.autoapply-action-menu button').forEach((button) => {
+      if (fillInFlight) {
+        if (!button.hasAttribute('data-autoapply-was-disabled')) {
+          button.setAttribute('data-autoapply-was-disabled', button.hasAttribute('disabled') ? '1' : '0');
+        }
+        button.setAttribute('disabled', '');
+      } else if (button.hasAttribute('data-autoapply-was-disabled')) {
+        if (button.getAttribute('data-autoapply-was-disabled') === '0') button.removeAttribute('disabled');
+        button.removeAttribute('data-autoapply-was-disabled');
+      }
+    });
   }
 
   /**
@@ -2020,46 +2386,56 @@
       console.error('[AutoApply] Filler module not found.');
       return;
     }
-
-    pageText(true); // The user is acting on the page now; refresh the cached page text.
-
-    // 1. Programmatically fill all inputs on the active DOM
-    const result = await fillCurrentInstructions(advance ? 'filled_for_next' : 'filled_for_review');
-    hasFilledCurrentPage = result.filled > 0;
-    const optionalFailures = failedFieldLabels(result.failures.filter((failure) => !pageFields.find((field) => field.id === failure.field_id)?.required));
-    const blocking = blockingRequiredFields();
-    if (blocking.length) {
-      renderMainUI();
-      showStatus(`Still required: ${blocking.join(', ')}. Answer them in this panel, then continue. Nothing was submitted.`, true);
+    if (fillInFlight) {
+      // A second click while the first fill is still running is not a second fill.
+      console.log('[AutoApply] A fill is already running; ignoring the duplicate trigger.');
       return;
     }
-    if (optionalFailures.length) {
-      showStatus(`Filled ${result.filled}. ${optionalFailures.length} optional field${optionalFailures.length === 1 ? '' : 's'} need your attention: ${optionalFailures.join(', ')}.`, false);
-    } else {
-      showStatus(`Filled ${result.filled}, skipped ${result.skipped}, failed ${result.failed}`, false);
-    }
+    setFillInFlight(true);
 
-    if (advance) {
-      // Small delay to ensure all async React/Angular updates settle
-      await new Promise(resolve => setTimeout(resolve, 500));
+    try {
+      pageText(true); // The user is acting on the page now; refresh the cached page text.
 
-      // 2. Click page continue button
-      const clicked = FILLER.clickNextButton();
-
-      if (clicked) {
-        showStatus('Form filled. Moving to next page...', false);
-
-        // 3. Wait for a real step change, bounded, then re-scan the next step
-        const advanced = await waitForPageChange(PAGE_CHANGE_TIMEOUT_MS);
-        if (!window.__autoapply_active) return; // The user closed the panel while waiting.
-        if (!advanced) console.warn('[AutoApply] No confirmed page change; refreshing the review for the current page.');
-        startScanningFlow({ force: true });
-      } else {
-        showStatus('Filled fields, but no Next/Continue button could be detected.', true);
+      // 1. Programmatically fill all inputs on the active DOM
+      const result = await fillCurrentInstructions(advance ? 'filled_for_next' : 'filled_for_review');
+      hasFilledCurrentPage = result.filled > 0;
+      const optionalFailures = failedFieldLabels(result.failures.filter((failure) => !pageFields.find((field) => field.id === failure.field_id)?.required));
+      const blocking = blockingRequiredFields();
+      if (blocking.length) {
+        renderMainUI();
+        showStatus(`Still required: ${blocking.join(', ')}. Answer them in this panel, then continue. Nothing was submitted.`, true);
+        return;
       }
-    } else {
-      renderMainUI();
-      showStatus('Fields are filled. Review the employer page before submitting.', false);
+      if (optionalFailures.length) {
+        showStatus(`Filled ${result.filled}. ${optionalFailures.length} optional field${optionalFailures.length === 1 ? '' : 's'} need your attention: ${optionalFailures.join(', ')}.`, false);
+      } else {
+        showStatus(`Filled ${result.filled}; ${result.skipped} skipped and ${result.failed} left for you.`, false);
+      }
+
+      if (advance) {
+        // Small delay to ensure all async React/Angular updates settle
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        // 2. Click page continue button
+        const clicked = FILLER.clickNextButton();
+
+        if (clicked) {
+          showStatus('Form filled. Moving to next page...', false);
+
+          // 3. Wait for a real step change, bounded, then re-scan the next step
+          const advanced = await waitForPageChange(PAGE_CHANGE_TIMEOUT_MS);
+          if (!window.__autoapply_active) return; // The user closed the panel while waiting.
+          if (!advanced) console.warn('[AutoApply] No confirmed page change; refreshing the review for the current page.');
+          startScanningFlow({ force: true });
+        } else {
+          showStatus('Filled fields, but no Next/Continue button could be detected.', true);
+        }
+      } else {
+        renderMainUI();
+        showStatus('Fields are filled. Review the employer page before submitting.', false);
+      }
+    } finally {
+      setFillInFlight(false);
     }
   }
 
@@ -2068,14 +2444,28 @@
    */
   function showStatus(text, isError) {
     if (!overlayContainer) return;
-    
+
     // Remove existing status if any
     const oldStatus = overlayContainer.querySelector('.autoapply-status');
     if (oldStatus) oldStatus.remove();
 
     const statusDiv = document.createElement('div');
     statusDiv.className = `autoapply-status ${isError ? 'error' : ''}`;
-    statusDiv.textContent = text;
+
+    const statusText = document.createElement('span');
+    statusText.textContent = text;
+    statusDiv.appendChild(statusText);
+
+    // Every banner can be dismissed; an error banner is never taken away on a
+    // timer, so the user decides when it goes.
+    const dismissBtn = document.createElement('button');
+    dismissBtn.type = 'button';
+    dismissBtn.className = 'autoapply-status-dismiss';
+    dismissBtn.setAttribute('aria-label', 'Dismiss this message');
+    dismissBtn.title = 'Dismiss';
+    dismissBtn.textContent = '✕';
+    dismissBtn.addEventListener('click', () => statusDiv.remove());
+    statusDiv.appendChild(dismissBtn);
 
     // Append above footer or at the bottom
     const footer = overlayContainer.querySelector('.autoapply-footer');
@@ -2084,6 +2474,8 @@
     } else {
       overlayContainer.appendChild(statusDiv);
     }
+
+    announce(text);
 
     // Auto-remove standard status messages after 5 seconds unless it's a critical error
     if (!isError) {
@@ -2109,16 +2501,24 @@
     // Register listeners for messages from the background script
     browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message.type === 'START_AUTOFILL') {
+        // An explicit start — the shortcut, or the popup — always wins over a
+        // panel this URL was dismissed on earlier.
+        dismissedUrl = null;
         startScanningFlow();
         sendResponse({ status: 'started' });
       } else if (message.type === 'GET_STATUS') {
         sendResponse({ status: window.__autoapply_active ? 'active' : 'idle' });
+      } else if (message.type === 'AA_DETECT_APPLICATION') {
+        // The popup cannot read the page itself; it asks this gate, so both
+        // agree on what counts as an application.
+        sendResponse({ ok: true, detected: looksLikeApplicationPage() });
       } else if (message.type === 'START_AUTOPILOT') {
+        dismissedUrl = null;
         autopilotState = 'starting';
         autopilotMessage = '';
         startScanningFlow()
-          .then((started) => (started ? runAutoPilot() : undefined))
-          .catch((err) => stopAutoPilot(`AutoPilot startup failed: ${err.message}`, 'failed'));
+          .then(() => { if (overlayContainer) requestAutoRun(); })
+          .catch((err) => stopAutoPilot(`Auto-run could not start: ${plainPhrase(err?.message)}`, 'failed'));
         sendResponse({ status: 'started' });
       } else if (message.type === 'GET_AUTOPILOT_STATUS') {
         sendResponse({

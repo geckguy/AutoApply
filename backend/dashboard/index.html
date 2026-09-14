@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AutoApply Workspace</title>
+    <title>AutoApply</title>
     <script>
         (() => {
             const saved = localStorage.getItem('autoapply-theme') || 'system';
@@ -14,27 +14,27 @@
             document.documentElement.dataset.themePreference = saved;
         })();
     </script>
-    <link rel="stylesheet" href="/dashboard/static/dashboard.css?v=9">
+    <link rel="stylesheet" href="/dashboard/static/dashboard.css?v=10">
 </head>
 <body>
     <div class="app-shell">
         <aside class="sidebar">
             <a class="brand" href="#today" data-open-view="today" aria-label="AutoApply home">
                 <img class="brand-mark" src="/dashboard/static/logo.svg" alt="">
-                <span><strong>AutoApply</strong><small>Job-search control desk</small></span>
+                <span><strong>AutoApply</strong><small>Your job search, in one place</small></span>
             </a>
 
-            <div class="route-line" aria-label="Application workflow">
-                <span class="route-step active"><i></i>Capture</span>
+            <div class="route-line" aria-label="How an application moves forward">
+                <span class="route-step"><i></i>Capture</span>
                 <span class="route-step"><i></i>Prepare</span>
                 <span class="route-step"><i></i>Apply</span>
                 <span class="route-step"><i></i>Follow up</span>
             </div>
 
-            <nav class="side-nav" aria-label="Workspace sections">
+            <nav class="side-nav" aria-label="Main sections">
                 <button class="nav-item active" data-view="today" type="button"><span>Today</span><small id="nav-action-count">0</small></button>
                 <button class="nav-item" data-view="applications" type="button"><span>Applications</span><small id="nav-app-count">0</small></button>
-                <button class="nav-item" data-view="profile" type="button"><span>Profile & assets</span><small id="nav-profile-state">—</small></button>
+                <button class="nav-item" data-view="profile" type="button"><span>Profile &amp; files</span><small id="nav-profile-state">—</small></button>
             </nav>
 
             <div class="sidebar-foot">
@@ -45,11 +45,11 @@
 
         <main class="workspace-main">
             <header class="topbar">
-                <div><p class="utility-label" id="current-view-label">Today</p><p class="topbar-note">Local workspace · your data stays on this computer</p></div>
+                <div><p class="utility-label" id="current-view-label">Today</p><p class="topbar-note">Your applications are saved on this computer</p></div>
                 <div class="topbar-actions">
                     <label class="theme-control" for="theme-select"><span aria-hidden="true">◐</span><span class="visually-hidden">Color theme</span><select id="theme-select" aria-label="Color theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
-                    <button class="button secondary" id="export-csv-btn" type="button">Export CSV</button>
-                    <button class="button primary" data-open-add-job type="button">Add a role</button>
+                    <button class="button secondary" id="export-csv-btn" type="button">Export spreadsheet</button>
+                    <button class="button primary" data-open-add-job type="button">Add an application</button>
                 </div>
             </header>
 
@@ -58,6 +58,8 @@
                     <div><p class="utility-label">Your next move</p><h1 id="today-title">Keep the search moving.</h1></div>
                     <p id="today-summary" class="view-intro">Loading the work that needs your attention…</p>
                 </div>
+
+                <section id="setup-notice" class="setup-notice" hidden></section>
 
                 <section id="next-action" class="next-action" aria-live="polite">
                     <div class="next-action-copy"><p class="utility-label">First up</p><h2>Finding your next action…</h2></div>
@@ -72,8 +74,8 @@
 
                 <div class="today-grid">
                     <section class="surface action-surface" aria-labelledby="action-list-title">
-                        <div class="surface-heading"><div><p class="utility-label">Action queue</p><h2 id="action-list-title">What needs attention</h2></div><span id="action-count" class="count-badge">0</span></div>
-                        <div id="action-list" class="action-list"><div class="empty-state">Loading your queue…</div></div>
+                        <div class="surface-heading"><div><p class="utility-label">Next actions</p><h2 id="action-list-title">What needs attention</h2></div><span id="action-count" class="count-badge">0</span></div>
+                        <div id="action-list" class="action-list"><div class="empty-state">Loading your next actions…</div></div>
                     </section>
                     <div class="today-side">
                         <section class="surface" aria-labelledby="schedule-title">
@@ -90,18 +92,18 @@
 
             <section id="view-applications" class="workspace-view" aria-labelledby="applications-title">
                 <div class="view-heading compact">
-                    <div><p class="utility-label">All opportunities</p><h1 id="applications-title">Applications</h1></div>
-                    <p class="view-intro">Search every role, then open one record to prepare, update, or follow up.</p>
+                    <div><p class="utility-label">All applications</p><h1 id="applications-title">Applications</h1></div>
+                    <p class="view-intro">Search everything you are tracking, then open one to prepare, update, or follow up.</p>
                 </div>
 
                 <section class="surface applications-surface">
                     <div class="application-toolbar">
-                        <label class="search-control"><span class="visually-hidden">Search applications</span><input id="search-input" type="search" placeholder="Search company, role, or platform"></label>
-                        <label class="select-control"><span>Stage</span><select id="status-filter"><option value="all">All active</option><option value="saved,draft,preparing">Inbox</option><option value="ready_to_review">Ready</option><option value="submitted,applied,no_response">Applied</option><option value="interview,negotiating">Interview</option><option value="offer">Offer</option><option value="accepted,rejected,withdrawn,archived">Closed</option></select></label>
-                        <label class="select-control"><span>Sort</span><select id="sort-filter"><option value="updated_desc">Recently updated</option><option value="fit_desc">Best fit</option><option value="target_asc">Next target date</option></select></label>
+                        <label class="search-control"><span class="visually-hidden">Search applications</span><input id="search-input" type="search" placeholder="Search company, job title, or website"></label>
+                        <label class="select-control"><span>Status</span><select id="status-filter"><option value="all">All in progress</option><option value="saved,draft,preparing">Inbox</option><option value="ready_to_review">Ready</option><option value="submitted,applied,no_response">Applied</option><option value="interview,negotiating">Interview</option><option value="offer">Offer</option><option value="accepted,rejected,withdrawn,archived">Closed</option></select></label>
+                        <label class="select-control"><span>Sort</span><select id="sort-filter"><option value="updated_desc">Recently updated</option><option value="fit_desc">Best match</option><option value="target_asc">Apply by: soonest</option></select></label>
                         <div class="view-toggle" aria-label="Application view"><button class="active" data-app-layout="list" type="button">List</button><button data-app-layout="board" type="button">Board</button></div>
                     </div>
-                    <div class="results-heading"><span id="results-count">0 roles</span><button class="quiet-link" data-open-add-job type="button">Add role manually</button></div>
+                    <div class="results-heading"><span id="results-count">0 applications</span><button class="quiet-link" data-open-add-job type="button">Add an application</button></div>
                     <div id="applications-list" class="applications-list"><div class="empty-state">Loading applications…</div></div>
                     <div id="pipeline-board" class="pipeline-board" hidden></div>
                 </section>
@@ -109,14 +111,88 @@
 
             <section id="view-profile" class="workspace-view" aria-labelledby="profile-title">
                 <div class="view-heading compact">
-                    <div><p class="utility-label">Reusable facts & files</p><h1 id="profile-title">Profile & assets</h1></div>
+                    <div><p class="utility-label">Reusable facts &amp; files</p><h1 id="profile-title">Profile &amp; files</h1></div>
                     <p class="view-intro">Verify the facts AutoApply can reuse, then decide which answers always need your review.</p>
                 </div>
 
-                <section class="setup-card" aria-labelledby="setup-title">
-                    <div><p class="utility-label">Setup readiness</p><h2 id="setup-title">Make every application easier.</h2><p id="profile-completeness-copy">Checking your reusable profile…</p></div>
-                    <div class="completion-meter" aria-hidden="true"><span id="profile-completeness-bar"></span></div>
-                    <strong id="profile-completeness">0%</strong>
+                <section class="setup-wizard" id="setup-wizard" aria-labelledby="setup-title">
+                    <div class="setup-wizard-head">
+                        <div>
+                            <p class="utility-label">Setup</p>
+                            <h2 id="setup-title">Finish setting up AutoApply</h2>
+                            <p id="setup-summary">Checking what AutoApply still needs…</p>
+                        </div>
+                        <strong class="setup-progress" id="setup-progress">Checking…</strong>
+                    </div>
+
+                    <ol class="setup-steps" id="setup-steps">
+                        <li class="setup-step" data-setup-step="provider" id="setup-step-provider">
+                            <span class="setup-step-marker" aria-hidden="true">1</span>
+                            <div class="setup-step-body">
+                                <div class="setup-step-head">
+                                    <h3 id="setup-step-provider-title">Choose your AI service</h3>
+                                    <span class="setup-step-state" id="setup-step-provider-state">Checking…</span>
+                                </div>
+                                <p class="setup-step-copy" id="setup-step-provider-copy"></p>
+                                <div class="setup-step-actions">
+                                    <button class="button secondary" type="button" id="setup-provider-toggle" aria-expanded="false" aria-controls="setup-provider-panel" hidden>Set up your AI service</button>
+                                </div>
+                                <div class="setup-panel" id="setup-provider-panel" hidden>
+                                    <form class="setup-form" id="setup-provider-form">
+                                        <label for="setup-provider-select"><span>AI service</span><select id="setup-provider-select" name="provider"></select></label>
+                                        <p class="setup-field-note" id="setup-provider-note" hidden></p>
+                                        <label for="setup-api-key"><span id="setup-key-label">Your key</span><input id="setup-api-key" name="api_key" type="password" autocomplete="off" spellcheck="false" required></label>
+                                        <p class="setup-field-note" id="setup-key-hint" hidden></p>
+                                        <label for="setup-model-select" id="setup-model-select-field" hidden><span>Model</span><select id="setup-model-select"></select></label>
+                                        <label for="setup-model-input" id="setup-model-input-field" hidden><span>Model name</span><input id="setup-model-input" type="text" placeholder="Paste the model name"></label>
+                                        <div class="setup-form-actions">
+                                            <button class="button primary" type="submit" id="setup-save-button">Save and test</button>
+                                            <a class="quiet-link" id="setup-key-link" href="#" target="_blank" rel="noopener" hidden>Get your key</a>
+                                        </div>
+                                    </form>
+                                    <p class="setup-result" id="setup-result" role="status" aria-live="polite"></p>
+                                </div>
+                            </div>
+                        </li>
+
+                        <li class="setup-step" data-setup-step="resume" id="setup-step-resume">
+                            <span class="setup-step-marker" aria-hidden="true">2</span>
+                            <div class="setup-step-body">
+                                <div class="setup-step-head">
+                                    <h3 id="setup-step-resume-title">Add your resume</h3>
+                                    <span class="setup-step-state" id="setup-step-resume-state">Checking…</span>
+                                </div>
+                                <p class="setup-step-copy" id="setup-step-resume-copy"></p>
+                                <div class="setup-step-actions">
+                                    <button class="button secondary" type="button" id="setup-resume-button">Upload a resume</button>
+                                </div>
+                            </div>
+                        </li>
+
+                        <li class="setup-step" data-setup-step="profile" id="setup-step-profile">
+                            <span class="setup-step-marker" aria-hidden="true">3</span>
+                            <div class="setup-step-body">
+                                <div class="setup-step-head">
+                                    <h3 id="setup-step-profile-title">Check your details</h3>
+                                    <span class="setup-step-state" id="setup-step-profile-state">Checking…</span>
+                                </div>
+                                <p class="setup-step-copy" id="setup-step-profile-copy"></p>
+                                <div class="setup-step-actions">
+                                    <button class="button secondary" type="button" id="setup-profile-button">Review your details</button>
+                                </div>
+                            </div>
+                        </li>
+                    </ol>
+                </section>
+
+                <section class="completeness-card" aria-labelledby="completeness-title">
+                    <div>
+                        <p class="utility-label">Profile details</p>
+                        <h2 id="completeness-title">Details AutoApply can reuse</h2>
+                        <p id="profile-completeness-copy">Checking your saved details…</p>
+                    </div>
+                    <div class="completion-meter" id="profile-completeness-meter" role="progressbar" aria-labelledby="completeness-title" aria-describedby="profile-completeness-copy" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0% of your details are filled in"><span id="profile-completeness-bar"></span></div>
+                    <strong id="profile-completeness" aria-hidden="true">0%</strong>
                 </section>
 
                 <div class="profile-grid">
@@ -143,8 +219,8 @@
 
                 <div class="profile-grid lower-grid">
                     <form id="policy-form" class="surface">
-                        <div class="surface-heading"><div><p class="utility-label">Autofill guardrails</p><h2>Review policy</h2></div><button class="button secondary" type="submit">Save policies</button></div>
-                        <div id="policy-list" class="policy-list"><div class="empty-state">Loading policies…</div></div>
+                        <div class="surface-heading"><div><p class="utility-label">Fill rules</p><h2>Fields you always review</h2></div><button class="button secondary" type="submit">Save fill rules</button></div>
+                        <div id="policy-list" class="policy-list"><div class="empty-state">Loading your fill rules…</div></div>
                     </form>
                     <form id="knowledge-form" class="surface form-surface">
                         <div class="surface-heading"><div><p class="utility-label">Extra context</p><h2>Application notes</h2></div><button class="button secondary" type="submit">Save notes</button></div>
@@ -153,7 +229,7 @@
                 </div>
 
                 <section class="surface answers-surface" aria-labelledby="answers-title">
-                    <div class="surface-heading"><div><p class="utility-label">Reusable writing</p><h2 id="answers-title">Answer vault</h2></div><label class="search-control compact-search"><span class="visually-hidden">Search answers</span><input id="answer-search" type="search" placeholder="Search saved answers"></label></div>
+                    <div class="surface-heading"><div><p class="utility-label">Reusable writing</p><h2 id="answers-title">Saved answers</h2></div><label class="search-control compact-search"><span class="visually-hidden">Search answers</span><input id="answer-search" type="search" placeholder="Search saved answers"></label></div>
                     <div id="answer-list" class="answer-list"><div class="empty-state">Generated answers will appear here for review.</div></div>
                 </section>
             </section>
@@ -170,19 +246,19 @@
 
     <dialog id="add-job-dialog" class="modal">
         <form id="add-job-form" method="dialog">
-            <div class="modal-heading"><div><p class="utility-label">Capture a role</p><h2>Add to your workspace</h2></div><button class="icon-button" type="button" data-close-add-job aria-label="Close add role dialog">×</button></div>
+            <div class="modal-heading"><div><p class="utility-label">Add an application</p><h2>Add to your applications</h2></div><button class="icon-button" type="button" data-close-add-job aria-label="Close add application dialog">×</button></div>
             <div id="add-job-fields" class="modal-fields">
                 <label>Application URL<input name="url" type="url" required placeholder="https://company.com/jobs/…"></label>
                 <label>Company<input name="company" required></label>
-                <label>Role<input name="role" required></label>
-                <label>Target date<input name="target_date" type="date"></label>
+                <label>Job title<input name="role" required></label>
+                <label>Apply by<input name="target_date" type="date"></label>
             </div>
             <div id="duplicate-choice" class="duplicate-choice" hidden></div>
             <div class="modal-actions"><button class="button secondary" type="button" data-close-add-job>Cancel</button><button id="add-job-submit" class="button primary" type="submit">Check and add</button></div>
         </form>
     </dialog>
 
-    <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/dashboard/static/dashboard.js?v=4"></script>
+    <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+    <script src="/dashboard/static/dashboard.js?v=5"></script>
 </body>
 </html>

@@ -51,6 +51,12 @@ class ProviderUnavailableRouteTests(unittest.TestCase):
             patch("backend.routers.autofill._load_corrections", return_value=[]),
         )
 
+    def assert_provider_error_is_plain(self, text: str) -> None:
+        """The sentence a user reads names no env var, file or status code."""
+        self.assertIn("Google Gemini", text)
+        for leaked in ("GEMINI_API_KEY", "backend/.env", "HTTP", "AI provider"):
+            self.assertNotIn(leaked, text)
+
     def test_autofill_keeps_local_instructions_and_reports_ai_error(self) -> None:
         schema = {
             "url": "https://jobs.example.test/apply",
@@ -66,7 +72,7 @@ class ProviderUnavailableRouteTests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code, response.text)
         body = response.json()
-        self.assertIn("GEMINI_API_KEY", body["ai_error"] or "")
+        self.assert_provider_error_is_plain(body["ai_error"] or "")
         instructions = {item["field_id"]: item for item in body["instructions"]}
         self.assertEqual("ada@example.test", instructions["email"]["value"])
         self.assertFalse(instructions["email"]["review_required"])
@@ -86,7 +92,7 @@ class ProviderUnavailableRouteTests(unittest.TestCase):
             )
 
         self.assertEqual(503, response.status_code, response.text)
-        self.assertIn("GEMINI_API_KEY", response.json()["detail"])
+        self.assert_provider_error_is_plain(response.json()["detail"])
 
     def test_tailor_resume_reports_the_missing_provider(self) -> None:
         with patch("backend.routers.autofill._load_profile", return_value=self.profile), patch(
@@ -97,7 +103,7 @@ class ProviderUnavailableRouteTests(unittest.TestCase):
             )
 
         self.assertEqual(503, response.status_code, response.text)
-        self.assertIn("GEMINI_API_KEY", response.json()["detail"])
+        self.assert_provider_error_is_plain(response.json()["detail"])
 
     def test_workspace_resume_tailor_reports_the_missing_provider(self) -> None:
         (self.data_dir / "profile.json").write_text(self.profile.model_dump_json())
@@ -110,7 +116,7 @@ class ProviderUnavailableRouteTests(unittest.TestCase):
             )
 
         self.assertEqual(503, response.status_code, response.text)
-        self.assertIn("GEMINI_API_KEY", response.json()["detail"])
+        self.assert_provider_error_is_plain(response.json()["detail"])
 
     def test_resume_upload_needs_a_provider_but_validates_the_file_first(self) -> None:
         with patch("backend.routers.profile.DATA_DIR", self.data_dir):
@@ -128,7 +134,7 @@ class ProviderUnavailableRouteTests(unittest.TestCase):
             )
 
         self.assertEqual(503, valid.status_code, valid.text)
-        self.assertIn("AI provider", valid.json()["detail"])
+        self.assert_provider_error_is_plain(valid.json()["detail"])
         self.assertNotIn("PDF", valid.json()["detail"])
         # Input validation keeps precedence over the provider check.
         self.assertEqual(400, not_pdf.status_code, not_pdf.text)

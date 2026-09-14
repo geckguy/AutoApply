@@ -3,7 +3,7 @@
   "name": "AutoApply",
   "version": "1.0.1",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA5PuMJYkdjTDK+Nk5aeS9bFoIlCgNvBoGxjku9LySk9PWVUdaxd/fMgqBArRyoLo4luJLGGJVVcvoMiqwhPFsyx2sabZaAOS3RB3OSyuWHon5eWCxvnBAxBBAICc8wS8GThU0OSuIrwIlzj4bHeqjaQUrLjphh5EyfJlRUudu+e0xbDOlyNTusfTPF3eq79yEhLoEep2TmeNessd/TTK4quYxOdRvAK5Cm/OMSMWztGiqwvRQSIEGeN+ARbwpV82bmS7eccVVBdoHvtRzEhI1NZrgv/BaxqG/QikTWFuxnhh1pzYzQ4MsFxa+JhVK3KNnS7UQ5QngSUe6+MwCYeTCawIDAQAB",
-  "description": "AI-powered job application autofill agent - scrapes forms, maps your profile, fills intelligently.",
+  "description": "Fills job application forms with the details you saved, so you can check and submit each application yourself.",
   "permissions": [
     "activeTab",
     "storage",

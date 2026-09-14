@@ -216,7 +216,7 @@ async def provider_not_configured_handler(request: Request, exc: ProviderNotConf
 async def provider_busy_handler(request: Request, exc: ProviderBusy):
     return JSONResponse(
         status_code=503,
-        content={"detail": "The AI provider is rate-limited. Try again shortly."},
+        content={"detail": "AutoApply is busy right now. Try again in a moment."},
     )
 
 
@@ -262,12 +262,13 @@ app.add_middleware(
 )
 
 # Import and include routers
-from backend.routers import profile, autofill, applications, workspace
+from backend.routers import profile, autofill, applications, workspace, setup
 
 app.include_router(profile.router)
 app.include_router(autofill.router)
 app.include_router(applications.router)
 app.include_router(workspace.router)
+app.include_router(setup.router)
 
 # Mount dashboard static files
 dashboard_dir = Path(__file__).parent / "dashboard"
