@@ -183,6 +183,11 @@ class Database:
 
     def _migrate_workspace_data(self) -> None:
         """Copy legacy records into additive workspace tables exactly once."""
+        # After the first copy every write is mirrored as it happens. Re-running
+        # would rescan both tables on each start and, worse, import later
+        # AI-drafted answer_bank rows into the vault as already approved.
+        if self.conn.execute("SELECT 1 FROM schema_migrations WHERE version=1").fetchone():
+            return
         with self._write_lock, self.conn:
             now = self._now()
             for app in self.conn.execute("SELECT * FROM applications").fetchall():
@@ -429,8 +434,11 @@ class Database:
         if not rows:
             all_apps = self.conn.execute("SELECT * FROM applications").fetchall()
             for app in all_apps:
-                c = app["company"].lower()
-                r = app["role"].lower()
+                # Legacy rows may have no company or role recorded.
+                c = (app["company"] or "").lower()
+                r = (app["role"] or "").lower()
+                if not c or not r:
+                    continue
                 cl = company.lower().strip()
                 rl = role.lower().strip()
                 if (cl in c or c in cl) and (rl in r or r in rl):
@@ -727,6 +735,25 @@ class Database:
             )
             self.conn.commit()
         return self._decode_row(self.conn.execute("SELECT * FROM answer_vault WHERE id=?", (item["id"],)).fetchone()) or {}
+
+    def save_generated_answer(self, item: dict) -> dict:
+        """Keep one pending AI-written answer per question and company.
+
+        Re-scanning a page regenerates its answers; they replace the pending
+        draft instead of piling up as new entries awaiting approval. An answer
+        the user already approved is never overwritten by a new draft.
+        """
+        key = hashlib.sha256(item["question"].casefold().strip().encode()).hexdigest()
+        existing = self.conn.execute(
+            "SELECT * FROM answer_vault WHERE question_key=? AND COALESCE(company,'')=? "
+            "ORDER BY approved DESC, updated_at DESC LIMIT 1",
+            (key, item.get("company") or ""),
+        ).fetchone()
+        if existing is not None and existing["approved"]:
+            return self._decode_row(existing) or {}
+        if existing is not None:
+            item = {**item, "id": existing["id"]}
+        return self.upsert_answer_vault(item)
 
     def list_answer_vault(self, limit: int = 100) -> list[dict]:
         return [self._decode_row(row) for row in self.conn.execute("SELECT * FROM answer_vault ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()]
