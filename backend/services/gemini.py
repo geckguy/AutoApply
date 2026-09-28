@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 import os
 
 from backend.services.llm_client import (
+    RETRY_DEADLINE_SECONDS,
     LLMClient,
     LLMResponseError,
     ProviderBusy,
@@ -30,9 +31,14 @@ load_dotenv(_backend_dir / ".env")
 # Retry only on transient conditions; a 4xx rejection will not heal with a retry.
 _RETRYABLE_STATUSES = frozenset({408, 409, 429})
 
-# Global rate limiter instance: 2 calls per 60 seconds unless overridden.
+# One attempt must finish inside the caller's own timeout budget.
+REQUEST_TIMEOUT_SECONDS = 30.0
+
+# Global rate limiter: 10 calls per 60 seconds unless overridden. A scan costs
+# one or two calls, so a lower budget stalls multi-step forms and batches; a
+# 429 from Gemini is still retried with the delay it asks for.
 _rate_limiter = RateLimiter(
-    max_calls=configured_max_calls_per_minute(2), period=60.0
+    max_calls=configured_max_calls_per_minute(10), period=60.0
 )
 
 
@@ -73,6 +79,27 @@ class GeminiClient(LLMClient):
         max_retries: int = 3,
     ) -> str:
         """Generate text from a prompt with retry logic."""
+        return self._generate(prompt, system_instruction, max_retries)
+
+    def generate_json(
+        self,
+        prompt: str,
+        system_instruction: Optional[str] = None,
+        max_retries: int = 3,
+    ):
+        """Generate with Gemini's JSON output mode, so replies parse first time."""
+        raw = self._generate(
+            prompt, system_instruction, max_retries, response_mime_type="application/json"
+        )
+        return self._extract_json(raw)
+
+    def _generate(
+        self,
+        prompt: str,
+        system_instruction: Optional[str],
+        max_retries: int,
+        response_mime_type: Optional[str] = None,
+    ) -> str:
         model = self.model
         if system_instruction:
             model = genai.GenerativeModel(
@@ -80,13 +107,21 @@ class GeminiClient(LLMClient):
                 system_instruction=system_instruction,
             )
 
+        generation_config = (
+            {"response_mime_type": response_mime_type} if response_mime_type else None
+        )
+        started = time.monotonic()
         last_error = None
         for attempt in range(max_retries):
             try:
                 # Enforce global rate limit before the actual call
                 _rate_limiter.wait_if_needed()
                 
-                response = model.generate_content(prompt)
+                response = model.generate_content(
+                    prompt,
+                    generation_config=generation_config,
+                    request_options={"timeout": REQUEST_TIMEOUT_SECONDS},
+                )
                 if not response.candidates:
                     raise ValueError("Gemini returned no candidates (possibly blocked by safety filters)")
                 return response.text
@@ -124,7 +159,15 @@ class GeminiClient(LLMClient):
                 match = re.search(r"Please retry in (\d+(?:\.\d+)?)s", error_str)
                 if match:
                     wait_time = float(match.group(1)) + 2.0  # Add a 2s buffer
-                
+
+                if time.monotonic() - started + wait_time > RETRY_DEADLINE_SECONDS:
+                    # The caller would have given up before the retry answered.
+                    if status == 429 or match:
+                        raise ProviderBusy(
+                            f"AutoApply is busy right now. Try again in {wait_time:.0f} seconds."
+                        ) from e
+                    break
+
                 logger.warning(
                     f"Gemini API attempt {attempt + 1}/{max_retries} failed. "
                     f"Retrying in {wait_time:.1f}s... Error snippet: {error_str[:100]}"

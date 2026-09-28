@@ -14,6 +14,7 @@ import httpx
 from dotenv import load_dotenv
 
 from backend.services.llm_client import (
+    RETRY_DEADLINE_SECONDS,
     LLMClient,
     LLMResponseError,
     ProviderBusy,
@@ -150,6 +151,7 @@ class OpenRouterClient(LLMClient):
         if self._privacy_mode == "strict":
             payload["provider"] = {"data_collection": "deny", "zdr": True}
 
+        started = time.monotonic()
         last_error = None
         for attempt in range(max_retries):
             try:
@@ -211,6 +213,14 @@ class OpenRouterClient(LLMClient):
                             wait_time = float(retry_after) + 1.0
                         except ValueError:
                             pass
+
+                if time.monotonic() - started + wait_time > RETRY_DEADLINE_SECONDS:
+                    # The caller would have given up before the retry answered.
+                    if status_code == 429:
+                        raise ProviderBusy(
+                            f"AutoApply is busy right now. Try again in {wait_time:.0f} seconds."
+                        ) from e
+                    break
 
                 logger.warning(
                     f"{self.label} attempt {attempt + 1}/{max_retries} failed. "
