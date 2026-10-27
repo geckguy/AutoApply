@@ -36,6 +36,11 @@ MAX_KNOWLEDGE_CHARS = 4000
 # callers abort at 30s (extension) and would otherwise wait on a dead response.
 MAX_PROVIDER_WAIT_SECONDS = 20.0
 
+# Retries are only attempted while they can still finish inside this budget,
+# measured from the start of the request: past it the extension has already
+# given up, and the work would only land after the user saw an error.
+RETRY_DEADLINE_SECONDS = 25.0
+
 
 class ProviderNotConfigured(ValueError):
     """The AI provider is selected but required configuration is missing."""

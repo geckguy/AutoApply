@@ -1,7 +1,10 @@
 """Autofill endpoints — form analysis, fill generation, corrections, and job analysis."""
 
+import hashlib
 import json
 import logging
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 from uuid import uuid4
@@ -37,6 +40,11 @@ _profile_cache = None
 _knowledge_cache = None
 _profile_mtime = 0
 _knowledge_mtime = 0
+
+# Recent match scores, keyed by posting + profile/knowledge versions.
+FIT_CACHE_LIMIT = 100
+_fit_cache: "OrderedDict[str, FitScore]" = OrderedDict()
+_fit_cache_lock = threading.Lock()
 
 
 def _load_profile() -> Optional[UserProfile]:
@@ -188,6 +196,17 @@ def analyze_job(body: JobDescriptionRequest):
 
     knowledge = _load_knowledge()
 
+    # A multi-step form, a re-scan, or a batch retry asks about the same posting
+    # again; the answer only changes when the posting, profile, or knowledge does.
+    cache_key = hashlib.sha256(
+        f"{_profile_mtime}|{_knowledge_mtime}|{job_description}".encode()
+    ).hexdigest()
+    with _fit_cache_lock:
+        cached = _fit_cache.get(cache_key)
+        if cached is not None:
+            _fit_cache.move_to_end(cache_key)
+            return cached
+
     analyzer = JobAnalyzer()
     fit_score = analyzer.analyze_job(
         job_description=job_description,
@@ -195,6 +214,12 @@ def analyze_job(body: JobDescriptionRequest):
         knowledge=knowledge,
     )
 
+    # A failed analysis is not an answer; the next request should try again.
+    if fit_score.recommendation != "unknown":
+        with _fit_cache_lock:
+            _fit_cache[cache_key] = fit_score
+            while len(_fit_cache) > FIT_CACHE_LIMIT:
+                _fit_cache.popitem(last=False)
     return fit_score
 
 
@@ -310,8 +335,8 @@ def _save_generated_answers(
                     answer=instruction.value,
                 )
                 db.add_answer(entry.model_dump())
-                if hasattr(db, "upsert_answer_vault"):
-                    db.upsert_answer_vault(
+                if hasattr(db, "save_generated_answer"):
+                    db.save_generated_answer(
                         {
                             "id": str(uuid4()),
                             **entry.model_dump(),

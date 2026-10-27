@@ -24,6 +24,7 @@
   let currentInstructions = [];
   let originalInstructionsMap = new Map(); // field_id -> original agent value
   let jobAnalysis = null;
+  let jobAnalysisText = ''; // Job description jobAnalysis was scored for; later steps reuse it.
   let companyName = '';
   let roleName = '';
   let isMinimized = false;
@@ -1028,10 +1029,17 @@
    * Ask for a match score. It never blocks the fill flow, it is never asked
    * for twice at once, and it always settles: a slow or failed request leaves
    * a retry control in the panel instead of a spinner that never stops.
+   * Later steps of the same posting reuse the score instead of spending
+   * another AI request on it.
    */
   async function analyzeFitProgressively() {
     if (!jdText || jdText.length < 100) return;
     if (fitAnalysisState === 'pending') return;
+    if (jobAnalysis && jobAnalysisText === jdText) {
+      fitAnalysisState = 'ready';
+      return;
+    }
+    const scoredText = jdText;
     fitAnalysisState = 'pending';
     fitAnalysisMessage = '';
     clearTimeout(fitAnalysisTimer);
@@ -1044,12 +1052,13 @@
     }, FIT_ANALYSIS_TIMEOUT_MS);
     renderReviewIfOpen();
     try {
-      const analysis = await UTILS.apiCall('/api/analyze-job', 'POST', { job_description: jdText });
+      const analysis = await UTILS.apiCall('/api/analyze-job', 'POST', { job_description: scoredText });
       if (analysis?.recommendation === 'unknown' && analysis?.score === 0) {
         fitAnalysisState = 'failed';
         fitAnalysisMessage = 'This posting does not say enough to score the match.';
       } else {
         jobAnalysis = analysis;
+        jobAnalysisText = scoredText;
         fitAnalysisState = 'ready';
         if (workspace.opportunityId) {
           await UTILS.workspaceCall(`/opportunities/${encodeURIComponent(workspace.opportunityId)}`, 'PATCH', { fit_score: analysis.score });
@@ -1112,11 +1121,13 @@
         return { ok:true, status:'duplicate', matches:context.duplicates, title:`${roleName} · ${companyName}` };
       }
       const result = await prepareCurrentPage({ url, title, platform, analyzeFit:false });
-      if (jdText && jdText.length >= 100) {
+      if (jdText && jdText.length >= 100 && !(jobAnalysis && jobAnalysisText === jdText)) {
         try {
-          const analysis = await UTILS.apiCall('/api/analyze-job', 'POST', { job_description:jdText });
+          const scoredText = jdText;
+          const analysis = await UTILS.apiCall('/api/analyze-job', 'POST', { job_description:scoredText });
           if (analysis?.recommendation !== 'unknown' && workspace.opportunityId) {
             jobAnalysis = analysis;
+            jobAnalysisText = scoredText;
             await UTILS.workspaceCall(`/opportunities/${encodeURIComponent(workspace.opportunityId)}`, 'PATCH', { fit_score:analysis.score });
           }
         } catch (error) {
@@ -2171,7 +2182,7 @@
         aiWarning = autofillRes.ai_error || '';
       } catch (err) {
         console.error('[AutoApply] AutoPilot autofill request failed:', err);
-        stopAutoPilot('Can\'t reach AutoApply, so Auto-run stopped. Nothing was submitted.', 'failed');
+        stopAutoPilot(`${preparationErrorMessage(err)} Auto-run stopped. Nothing was submitted.`, 'failed');
         return;
       }
       
